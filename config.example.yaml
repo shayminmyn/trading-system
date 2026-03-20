@@ -55,16 +55,27 @@ strategies:
     rsi_oversold: 30
 
   SonicR:
-    ema_fast: 34                  # EMA cluster short-term (cụm nến ngắn hạn)
-    ema_slow: 89                  # EMA cluster long-term  (xác định xu hướng)
+    ema_fast: 34                    # EMA cluster ngắn hạn
+    ema_slow: 89                    # EMA cluster dài hạn (xu hướng chính)
     atr_period: 14
-    atr_mult_far: 2.0             # Hệ số ATR để xác định "far value zone"
-    sl_buffer_atr: 0.3            # Buffer ATR cộng thêm khi đặt SL
-    min_ema_separation_atr: 0.5   # Khoảng tối thiểu EMA34-EMA89 / ATR (lọc sideway)
-    slope_lookback: 5             # Số nến để đo slope của EMA
-    pullback_lookback: 30         # Cửa sổ tìm vùng pullback/correction
-    extension_lookback: 20        # Cửa sổ tìm extension trước pullback
-    min_rr: 1.0                   # RR tối thiểu (bỏ qua lệnh nếu RR < giá trị này)
+    atr_mult_far: 2.0               # Hệ số ATR xác định "far value zone"
+    sl_buffer_atr: 0.3              # Buffer ATR khi đặt SL
+    min_ema_separation_atr: 0.5     # Khoảng tối thiểu EMA34–EMA89 / ATR (lọc sideway)
+    slope_lookback: 5               # Số nến đo slope EMA89
+    pullback_lookback: 30           # Cửa sổ tìm pullback / correction
+    extension_lookback: 20          # Cửa sổ tìm extension trước pullback
+    ema89_touch_atr: 0.5            # Khoảng dung sai ATR cho "chạm EMA89"
+    # Bộ lọc tối ưu (set to false để tắt từng filter)
+    require_ema89_touch: true       # Pullback phải đạt đến vùng EMA89
+    require_ema89_rejection: true   # Nến vào lệnh phải bị từ chối tại EMA89
+    require_strong_candle: true     # Thân nến > strong_candle_ratio × range
+    strong_candle_ratio: 0.5        # Tỷ lệ tối thiểu thân/range (0.5 = 50%)
+    min_rr: 1.0                     # RR tối thiểu để chấp nhận lệnh
+    # Sideways Oscillation Signal
+    enable_sw_signal: true          # Bật tín hiệu sw đi quanh EMA34
+    sw_lookback: 30                 # Số nến tối thiểu để xác nhận sideway
+    sw_min_crosses: 3               # Số lần giá cắt qua EMA34 tối thiểu
+    sw_max_range_atr: 4.0           # Range tối đa tính theo ATR
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:

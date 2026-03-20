@@ -29,12 +29,14 @@ def _make_signal(symbol, action, entry, sl_pips) -> Signal:
 
 class TestLotSizeCalculation:
     def test_xauusd_buy_lot(self, rm):
-        """XAUUSD: balance=$10,000, risk=1.5%, SL=55pips → $150 risk"""
+        """XAUUSD: balance=$10,000, risk=1.5%, SL=55pips → $150 risk
+        pip_value=10.0 (1 pip=$0.10, 100oz lot), lot = 150 / (55 * 10) = 0.27
+        """
         signal = _make_signal("XAUUSD", "BUY", 2150.50, 55.0)
         result = rm.build_complete_signal(signal)
         assert result is not None
-        # pip_value=1.0, lot = 150 / (55 * 1.0) = 2.73
-        assert result.volume == pytest.approx(2.73, abs=0.01)
+        # pip_value=10.0, lot = 150 / (55 * 10.0) = 0.27
+        assert result.volume == pytest.approx(0.27, abs=0.01)
         assert result.risk_amount_usd == pytest.approx(150.0, abs=0.01)
 
     def test_eurusd_buy_lot(self, rm):
@@ -62,12 +64,13 @@ class TestLotSizeCalculation:
 
 class TestSLTPCalculation:
     def test_xauusd_buy_sl_tp(self, rm):
+        """1 pip = $0.10, so SL 55 pips = $5.50 distance."""
         signal = _make_signal("XAUUSD", "BUY", 2150.50, 55.0)
         result = rm.build_complete_signal(signal)
         assert result is not None
-        expected_sl = 2150.50 - (55 * 0.01)
-        expected_tp1 = 2150.50 + (55 * 0.01 * 2.0)
-        assert result.sl == pytest.approx(expected_sl, abs=0.01)
+        expected_sl  = 2150.50 - (55 * 0.10)   # 2145.00
+        expected_tp1 = 2150.50 + (55 * 0.10 * 2.0)  # 2161.50
+        assert result.sl  == pytest.approx(expected_sl,  abs=0.01)
         assert result.tp1 == pytest.approx(expected_tp1, abs=0.01)
 
     def test_eurusd_sell_sl_tp(self, rm):
@@ -100,7 +103,8 @@ class TestEdgeCases:
         assert rm.build_complete_signal(signal) is None
 
     def test_pip_value_xauusd(self, rm):
-        assert rm.get_pip_value("XAUUSD") == pytest.approx(1.0)
+        # 1 pip = $0.10, lot = 100 oz → pip_value = $10/lot
+        assert rm.get_pip_value("XAUUSD") == pytest.approx(10.0)
 
     def test_pip_value_eurusd(self, rm):
         assert rm.get_pip_value("EURUSD") == pytest.approx(10.0)

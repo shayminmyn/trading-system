@@ -95,6 +95,14 @@ class RSI_EMA_Strategy(BaseStrategy):
         return self._no_signal()
 
     def _price_distance_to_pips(self, distance: float) -> float:
-        if self.symbol == "XAUUSD":
+        """Convert raw price distance to pips.
+        XAUUSD/XAGUSD : 1 pip = $0.10  (1 USD move = 10 pips)
+        JPY pairs     : 1 pip = 0.01
+        Standard Forex: 1 pip = 0.0001
+        """
+        sym = self.symbol.upper()
+        if sym in ("XAUUSD", "XAGUSD"):
+            return distance / 0.10
+        if "JPY" in sym:
             return distance / 0.01
         return distance / 0.0001

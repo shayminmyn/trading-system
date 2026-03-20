@@ -8,12 +8,12 @@ Responsibilities:
   - Guard against duplicate signals (dedup by symbol+timeframe+action)
 
 Pip value reference:
-  FOREX 4-digit (EURUSD, GBPUSD, etc.):
+  FOREX standard (EURUSD, GBPUSD, etc.):
     Standard lot = 100,000 units | 1 pip = 0.0001 | pip_value = $10/pip/lot
 
   XAUUSD (Gold):
-    Standard lot = 100 oz | 1 pip = $0.01 price move | pip_value = $1/pip/lot
-    (some brokers use 1 lot = 100 oz, so $0.01 × 100 = $1 per pip per lot)
+    1 pip = $0.10 price move (1 USD move = 10 pips)
+    Standard lot = 100 oz | pip_value = 0.10 × 100 = $10/pip/lot
 
   USDJPY / JPY pairs:
     1 pip = 0.01 | pip_value ≈ $9.09/pip/lot (varies with USD/JPY rate)
@@ -34,7 +34,8 @@ logger = get_logger("risk_manager")
 
 # Default pip values per lot for common symbols (USD account)
 _DEFAULT_PIP_VALUE: dict[str, float] = {
-    "XAUUSD":  1.0,    # 1 pip ($0.01) × 100 oz = $1/lot
+    "XAUUSD": 10.0,    # 1 pip ($0.10) × 100 oz = $10/lot
+    "XAGUSD": 10.0,    # same convention as Gold
     "EURUSD": 10.0,    # 0.0001 × 100,000 = $10/lot
     "GBPUSD": 10.0,
     "AUDUSD": 10.0,
@@ -197,16 +198,20 @@ class RiskManager:
         return entry - tp_distance
 
     def _pip_size(self, symbol: str) -> float:
-        """1 pip in price units."""
-        if symbol == "XAUUSD":
-            return 0.01
+        """1 pip in price units.
+        XAUUSD/XAGUSD : $0.10  (1 USD move = 10 pips)
+        JPY pairs     : 0.01
+        Standard Forex: 0.0001
+        """
+        if symbol in ("XAUUSD", "XAGUSD"):
+            return 0.10
         if "JPY" in symbol:
             return 0.01
         return 0.0001
 
     def _digits(self, symbol: str) -> int:
-        if symbol == "XAUUSD":
-            return 2
+        if symbol in ("XAUUSD", "XAGUSD"):
+            return 2   # e.g. 2150.50 — round to cents
         if "JPY" in symbol:
             return 3
         return 5

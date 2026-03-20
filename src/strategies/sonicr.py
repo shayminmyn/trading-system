@@ -136,15 +136,6 @@ class SonicRStrategy(BaseStrategy):
         # ── RR ────────────────────────────────────────────────────────────────
         self._min_rr: float            = p.get("min_rr", 1.0)
 
-        # ── Limit-order entry optimisation ────────────────────────────────────
-        # When True: instead of entering at market on signal bar close,
-        # place a limit order at pac_mid (EMA34) and wait up to
-        # limit_expiry_bars for price to retrace there.
-        # This gives a tighter SL (measured from pac_mid, not close) and
-        # a better-quality entry in the "value zone".
-        self._limit_entry: bool        = bool(p.get("limit_entry", True))
-        self._limit_expiry: int        = int(p.get("limit_expiry_bars", 5))
-
         self._min_bars = max(
             self._ema_trend,
             self._ema_slow + self._pb_lookback + self._ext_lookback,
@@ -247,9 +238,20 @@ class SonicRStrategy(BaseStrategy):
             if curr["close"] <= ema200:
                 return None
 
-            sl_level = float(pac_low) - atr * self._sl_buffer_atr
-            return self._finalize_signal(
-                "BUY", sl_level, curr,
+            sl_level    = float(pac_low) - atr * self._sl_buffer_atr
+            sl_distance = curr["close"] - sl_level
+            if sl_distance <= 0:
+                return None
+
+            tp_ref = float(curr.get("pac_high", pac_high))
+            rr     = (tp_ref - curr["close"]) / sl_distance if sl_distance > 0 else 0.0
+            # TP handled by RiskManager; just check minimum SL is valid
+            sl_pips = self._price_to_pips(sl_distance)
+            if sl_pips <= 0:
+                return None
+
+            return self._make_signal(
+                "BUY", curr["close"], sl_pips,
                 f"PAC-Breakout BUY | pac_high={pac_high:.5f} ema200={ema200:.5f}",
             )
 
@@ -258,9 +260,17 @@ class SonicRStrategy(BaseStrategy):
             if curr["close"] >= ema200:
                 return None
 
-            sl_level = float(pac_high) + atr * self._sl_buffer_atr
-            return self._finalize_signal(
-                "SELL", sl_level, curr,
+            sl_level    = float(pac_high) + atr * self._sl_buffer_atr
+            sl_distance = sl_level - curr["close"]
+            if sl_distance <= 0:
+                return None
+
+            sl_pips = self._price_to_pips(sl_distance)
+            if sl_pips <= 0:
+                return None
+
+            return self._make_signal(
+                "SELL", curr["close"], sl_pips,
                 f"PAC-Breakout SELL | pac_low={pac_low:.5f} ema200={ema200:.5f}",
             )
 
@@ -296,9 +306,17 @@ class SonicRStrategy(BaseStrategy):
             if not (curr["close"] > ema89 and curr["close"] > curr["open"]):
                 return None
 
-            sl_level = float(curr["low"]) - atr * self._sl_buffer_atr
-            return self._finalize_signal(
-                "BUY", sl_level, curr,
+            sl_level    = float(curr["low"]) - atr * self._sl_buffer_atr
+            sl_distance = curr["close"] - sl_level
+            if sl_distance <= 0:
+                return None
+
+            sl_pips = self._price_to_pips(sl_distance)
+            if sl_pips <= 0:
+                return None
+
+            return self._make_signal(
+                "BUY", curr["close"], sl_pips,
                 f"PAC-Rejection BUY | pac_high={pac_high:.5f} ema89={ema89:.5f}",
             )
 
@@ -307,9 +325,17 @@ class SonicRStrategy(BaseStrategy):
             if not (curr["close"] < ema89 and curr["close"] < curr["open"]):
                 return None
 
-            sl_level = float(curr["high"]) + atr * self._sl_buffer_atr
-            return self._finalize_signal(
-                "SELL", sl_level, curr,
+            sl_level    = float(curr["high"]) + atr * self._sl_buffer_atr
+            sl_distance = sl_level - curr["close"]
+            if sl_distance <= 0:
+                return None
+
+            sl_pips = self._price_to_pips(sl_distance)
+            if sl_pips <= 0:
+                return None
+
+            return self._make_signal(
+                "SELL", curr["close"], sl_pips,
                 f"PAC-Rejection SELL | pac_low={pac_low:.5f} ema89={ema89:.5f}",
             )
 
@@ -392,12 +418,24 @@ class SonicRStrategy(BaseStrategy):
             return None
 
         sl_level    = min(pullback_low, float(ema89)) - atr * self._sl_buffer_atr
-        recent_high = float(ext_slice["high"].max())
-        return self._finalize_signal(
-            "BUY", sl_level, curr,
+        sl_distance = curr["close"] - sl_level
+        if sl_distance <= 0:
+            return None
+
+        recent_high  = float(ext_slice["high"].max())
+        rr           = (recent_high - curr["close"]) / sl_distance if sl_distance > 0 else 0.0
+        if rr < self._min_rr:
+            logger.debug("SonicR BUY skipped RR=%.2f < %.1f", rr, self._min_rr)
+            return None
+
+        sl_pips = self._price_to_pips(sl_distance)
+        if sl_pips <= 0:
+            return None
+
+        return self._make_signal(
+            "BUY", curr["close"], sl_pips,
             f"SonicR BUY★ | pac_mid={pac_mid:.5f} ema89={ema89:.5f} "
-            f"PB_low={pullback_low:.5f}",
-            rr_ref_price=recent_high,
+            f"PB_low={pullback_low:.5f} RR≈{rr:.1f}",
         )
 
     # ── Layer 3a: Extension / Pullback SELL ──────────────────────────────────
@@ -468,13 +506,25 @@ class SonicRStrategy(BaseStrategy):
         if correction_high > float(ext_slice["high"].max()) * 1.0010:
             return None
 
-        sl_level   = max(correction_high, float(ema89)) + atr * self._sl_buffer_atr
-        recent_low = float(ext_slice["low"].min())
-        return self._finalize_signal(
-            "SELL", sl_level, curr,
+        sl_level    = max(correction_high, float(ema89)) + atr * self._sl_buffer_atr
+        sl_distance = sl_level - curr["close"]
+        if sl_distance <= 0:
+            return None
+
+        recent_low  = float(ext_slice["low"].min())
+        rr          = (curr["close"] - recent_low) / sl_distance if sl_distance > 0 else 0.0
+        if rr < self._min_rr:
+            logger.debug("SonicR SELL skipped RR=%.2f < %.1f", rr, self._min_rr)
+            return None
+
+        sl_pips = self._price_to_pips(sl_distance)
+        if sl_pips <= 0:
+            return None
+
+        return self._make_signal(
+            "SELL", curr["close"], sl_pips,
             f"SonicR SELL★ | pac_mid={pac_mid:.5f} ema89={ema89:.5f} "
-            f"COR_high={correction_high:.5f}",
-            rr_ref_price=recent_low,
+            f"COR_high={correction_high:.5f} RR≈{rr:.1f}",
         )
 
     # ── Layer 3b: SW Oscillation ──────────────────────────────────────────────
@@ -511,12 +561,24 @@ class SonicRStrategy(BaseStrategy):
             if self._req_strong_candle and not self._is_strong_candle(curr, "BUY"):
                 return None
 
-            sl_level = range_low - atr * self._sl_buffer_atr
-            return self._finalize_signal(
-                "BUY", sl_level, curr,
+            sl_level    = range_low - atr * self._sl_buffer_atr
+            sl_distance = curr["close"] - sl_level
+            if sl_distance <= 0:
+                return None
+
+            tp_distance = range_high - curr["close"]
+            rr          = tp_distance / sl_distance if sl_distance > 0 else 0.0
+            if rr < self._min_rr:
+                return None
+
+            sl_pips = self._price_to_pips(sl_distance)
+            if sl_pips <= 0:
+                return None
+
+            return self._make_signal(
+                "BUY", curr["close"], sl_pips,
                 f"SonicR SW-BUY | pac_mid={pac_mid:.5f} "
-                f"Range=[{range_low:.5f}–{range_high:.5f}]",
-                rr_ref_price=range_high,
+                f"Range=[{range_low:.5f}–{range_high:.5f}] RR≈{rr:.1f}",
             )
 
         # SELL: rejection downward through pac_mid
@@ -524,12 +586,24 @@ class SonicRStrategy(BaseStrategy):
             if self._req_strong_candle and not self._is_strong_candle(curr, "SELL"):
                 return None
 
-            sl_level = range_high + atr * self._sl_buffer_atr
-            return self._finalize_signal(
-                "SELL", sl_level, curr,
+            sl_level    = range_high + atr * self._sl_buffer_atr
+            sl_distance = sl_level - curr["close"]
+            if sl_distance <= 0:
+                return None
+
+            tp_distance = curr["close"] - range_low
+            rr          = tp_distance / sl_distance if sl_distance > 0 else 0.0
+            if rr < self._min_rr:
+                return None
+
+            sl_pips = self._price_to_pips(sl_distance)
+            if sl_pips <= 0:
+                return None
+
+            return self._make_signal(
+                "SELL", curr["close"], sl_pips,
                 f"SonicR SW-SELL | pac_mid={pac_mid:.5f} "
-                f"Range=[{range_low:.5f}–{range_high:.5f}]",
-                rr_ref_price=range_low,
+                f"Range=[{range_low:.5f}–{range_high:.5f}] RR≈{rr:.1f}",
             )
 
         return None
@@ -634,67 +708,3 @@ class SonicRStrategy(BaseStrategy):
         if "JPY" in sym:
             return distance / 0.01
         return distance / 0.0001
-
-    # ── Limit-order entry helper ──────────────────────────────────────────────
-
-    def _finalize_signal(
-        self,
-        action: str,
-        sl_level: float,
-        curr: pd.Series,
-        notes: str,
-        rr_ref_price: float | None = None,
-    ) -> Signal | None:
-        """
-        Build the final Signal using either market or limit-order entry.
-
-        Market mode  (limit_entry=False):
-            entry = curr["close"]  (enter on next bar's open via backtest)
-
-        Limit mode   (limit_entry=True):
-            entry = curr["pac_mid"]  (EMA34 — the "value zone" limit price)
-            The backtester will place a limit order at pac_mid and fill only
-            when price retraces there within limit_expiry_bars bars.
-            SL is measured from pac_mid → tighter SL, better R:R.
-
-        Parameters
-        ----------
-        action        : "BUY" or "SELL"
-        sl_level      : absolute SL price (same regardless of entry mode)
-        curr          : last bar Series (must contain pac_mid, close)
-        notes         : signal note string
-        rr_ref_price  : optional reference price to check min_rr from entry;
-                        pass the TP reference (e.g., recent_high / recent_low)
-        """
-        pac_mid = float(curr["pac_mid"])
-        entry   = pac_mid if self._limit_entry else float(curr["close"])
-
-        if action == "BUY":
-            sl_distance = entry - sl_level
-        else:
-            sl_distance = sl_level - entry
-
-        if sl_distance <= 0:
-            return None
-
-        # Optional R:R check from the chosen entry price
-        if rr_ref_price is not None:
-            if action == "BUY":
-                rr = (rr_ref_price - entry) / sl_distance
-            else:
-                rr = (entry - rr_ref_price) / sl_distance
-            if rr < self._min_rr:
-                logger.debug(
-                    "SonicR %s skipped — RR=%.2f < %.1f (entry=%.5f, sl=%.5f, ref=%.5f)",
-                    action, rr, self._min_rr, entry, sl_level, rr_ref_price,
-                )
-                return None
-
-        sl_pips = self._price_to_pips(sl_distance)
-        if sl_pips <= 0:
-            return None
-
-        sig = self._make_signal(action, entry, sl_pips, notes)
-        if self._limit_entry:
-            sig.limit_expiry_bars = self._limit_expiry
-        return sig

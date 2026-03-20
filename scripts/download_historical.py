@@ -142,6 +142,37 @@ YF_INTERVALS: list[dict] = [
 _SESSION = requests.Session()
 _SESSION.headers["User-Agent"] = "Mozilla/5.0 TradingDataBot/2.0"
 
+# Expected median bar spacing (seconds) per yfinance interval string.
+# Used to detect when yfinance silently downgrades resolution (e.g. returns
+# D1 bars when 1h is requested for gold futures over a long date range).
+_EXPECTED_INTERVAL_SECS: dict[str, int] = {
+    "1d":  86_400,
+    "1h":   3_600,
+    "4h":  14_400,
+    "15m":    900,
+    "5m":     300,
+}
+# Allow up to this multiplier over the expected spacing before rejecting.
+_INTERVAL_TOLERANCE = 4
+
+
+def _check_bar_frequency(df: pd.DataFrame, interval: str) -> bool:
+    """Return True if the data's actual bar spacing is ≈ expected interval.
+
+    yfinance sometimes silently returns lower-resolution data (e.g. daily bars
+    instead of hourly bars for gold futures over a 2-year window).  This check
+    guards against saving stale/wrong-resolution data.
+    """
+    if len(df) < 5:
+        return True  # too few bars to judge — accept
+
+    expected = _EXPECTED_INTERVAL_SECS.get(interval)
+    if expected is None:
+        return True  # unknown interval — skip check
+
+    median_secs = df["timestamp"].diff().dropna().dt.total_seconds().median()
+    return median_secs <= expected * _INTERVAL_TOLERANCE
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Backend 1 — Yahoo Finance

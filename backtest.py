@@ -81,7 +81,7 @@ def main() -> None:
                 continue
             
             df = load_data(symbol, tf, cfg.raw, args.mock_bars)
-            df = df[df["timestamp"] > "2026-01-01 00:00:00"]
+            df = df[df["timestamp"] > "2026-01-01"]
             if df.empty or len(df) < 100:
                 logger.warning("Not enough data for %s/%s — skipping", symbol, tf)
                 continue
