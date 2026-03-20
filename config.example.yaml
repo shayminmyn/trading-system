@@ -41,7 +41,9 @@ session_filters:
   news_events_file: "data/news_events.csv"   # copy từ news_events.example.csv và cập nhật lịch
 
 # ── MetaTrader5 ───────────────────────────────────────────────────────────────
-# MT5 only works on Windows. Leave blank when developing on macOS/Linux.
+# Chỉ Windows + terminal MT5 đang mở (đã login). Cài: pip install MetaTrader5
+# Bật dữ liệu thật: đặt data.fallback_source khác "mock" (vd. "mt5" bên dưới).
+# Có thể override: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
 mt5:
   login: 12345678
   password: "YOUR_MT5_PASSWORD"
@@ -144,10 +146,16 @@ data:
   historical_dir: "data/historical"
   # bars_to_load: How many past bars to load on startup for indicator warmup
   warmup_bars: 200
-  # Data source when MT5 is unavailable: "csv" or "mock"
+  # Windows + MT5: đặt "mt5" (hoặc bất kỳ giá trị nào KHÁC "mock") để dùng copy_rates thật.
+  # macOS/Linux dev: giữ "mock" (hoặc không có MT5).
   fallback_source: "mock"
-  # Polling interval in seconds when streaming via MT5 copy_rates
+  # MT5: khoảng cách mỗi lần hỏi API (giây). Mỗi lần lấy 2 nến; nến đóng mới → strategy.
+  # Không phải “1 nến/giây” — khung thời gian nến vẫn là M5/H1/… trong trading_pairs.
   poll_interval_seconds: 1
+  # Buffer OHLCV trong RAM (tối đa). Vượt quá → các nến cũ append ra CSV (tránh OOM khi chạy lâu).
+  buffer_max_bars: 5000
+  buffer_spill_enabled: true
+  buffer_spill_dir: "data/live_buffer"
   # Mock-only: delay between synthetic bars (default: use poll_interval_seconds).
   # Set e.g. 0.05 for fast local testing (Telegram / strategy) without waiting for real bar times.
   # mock_poll_interval_seconds: 0.05

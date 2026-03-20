@@ -8,6 +8,7 @@ __pycache__/
 htmlcov/
 logs/*.log
 data/historical/*.csv
+data/live_buffer/*.csv
 backtest_results/
 *.egg-info/
 dist/

@@ -7,14 +7,23 @@ Responsibilities:
   - Notify registered strategy callbacks when a new bar closes
   - Each (symbol, timeframe) pair runs in its own dedicated thread.
     With Python 3.13t/3.14t (no-GIL) these threads are truly parallel.
+
+MT5 live (``data.fallback_source != mock``):
+  - Mỗi ``poll_interval_seconds`` (vd. 1s) gọi API **2 nến** mới nhất của đúng
+    ``timeframe`` (M5/H1/…) — **không** gom tick theo giây; nến do broker/MT5 định nghĩa.
+  - Trong 2 nến: nến cũ hơn = đã **đóng** (OHLC chốt), nến mới hơn = đang chạy.
+  - Khi có nến đóng mới (so timestamp open) → cập nhật buffer rồi chạy strategy.
+  - Buffer có giới hạn ``buffer_max_bars``; phần cũ có thể append ra CSV (``buffer_spill_*``) để tránh OOM.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 import pandas as pd
@@ -63,6 +72,13 @@ class DataManager:
         self._mock_replay_max_bars: int = max(1, int(data_cfg.get("mock_replay_max_bars", 2000)))
         self._mock_replay_seed_bars: int = max(1, int(data_cfg.get("mock_replay_seed_bars", 200)))
 
+        # Rolling buffer: giữ tối đa N nến trong RAM; phần vượt ghi ra đĩa (append CSV) nếu bật spill.
+        self._buffer_max_bars: int = max(1, int(data_cfg.get("buffer_max_bars", 5000)))
+        self._buffer_spill_enabled: bool = bool(data_cfg.get("buffer_spill_enabled", True))
+        spill_dir = data_cfg.get("buffer_spill_dir", "data/live_buffer")
+        self._buffer_spill_dir: Path = Path(str(spill_dir))
+        self._spill_write_lock = threading.Lock()
+
         # DataFrame store: key = (symbol, timeframe)
         self._data: dict[tuple[str, str], pd.DataFrame] = {}
         self._data_lock = threading.Lock()
@@ -76,6 +92,8 @@ class DataManager:
         self._historical_loader = HistoricalLoader(self._hist_dir)
         # Remaining OHLCV rows to append in mock replay mode (per stream thread).
         self._replay_remaining: dict[tuple[str, str], pd.DataFrame] = {}
+        # MT5: timestamp của nến đã đóng mới nhất đã xử lý (tránh gọi strategy trùng).
+        self._mt5_last_closed_ts: dict[tuple[str, str], pd.Timestamp | None] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -225,15 +243,24 @@ class DataManager:
         and fires registered callbacks.
         With no-GIL Python these loops run truly in parallel.
         """
+        key = (symbol, timeframe)
         tf_sec = _TIMEFRAME_SECONDS.get(timeframe, 3600)
         last_bar_time: datetime | None = None
         bar_counter = 0
         is_mock = self._connector is None
+        is_mt5 = self._connector is not None and hasattr(
+            self._connector, "get_ohlcv"
+        )
         wait_sec = (
             self._mock_poll_interval
             if is_mock and self._mock_poll_interval is not None
             else self._poll_interval
         )
+
+        # MT5: poll ~mỗi giây, mỗi lần lấy 2 nến từ API; chỉ gọi strategy khi có nến *đóng* mới.
+        if is_mt5:
+            self._stream_loop_mt5(symbol, timeframe, key, wait_sec, tf_sec)
+            return
 
         replay_left = len(
             self._replay_remaining.get((symbol, timeframe), pd.DataFrame())
@@ -292,11 +319,199 @@ class DataManager:
 
         logger.debug("Stream loop stopped: %s %s", symbol, timeframe)
 
+    def _mt5_init_closed_anchor(self, key: tuple[str, str]) -> None:
+        """
+        Neo thời điểm nến đã đóng mới nhất sau warmup để lần poll đầu không bắn strategy trùng.
+        Warmup từ MT5: hàng cuối thường là nến đang chạy → nến đóng gần nhất = iloc[-2].
+        """
+        if key in self._mt5_last_closed_ts:
+            return
+        with self._data_lock:
+            df0 = self._data.get(key, pd.DataFrame())
+        if len(df0) >= 2:
+            self._mt5_last_closed_ts[key] = pd.Timestamp(df0.iloc[-2]["timestamp"])
+        elif len(df0) == 1:
+            self._mt5_last_closed_ts[key] = pd.Timestamp(df0.iloc[-1]["timestamp"])
+        else:
+            self._mt5_last_closed_ts[key] = None
+
+    def _mt5_poll_new_closed_bar(
+        self, symbol: str, timeframe: str, key: tuple[str, str]
+    ) -> pd.Series | None:
+        """
+        Mỗi lần poll: copy_rates 2 nến — nến cũ hơn trong 2 nến mới nhất = nến đã đóng (OHLC chốt).
+        Chỉ trả về Series khi có nến đóng *mới* so với _mt5_last_closed_ts.
+        """
+        df2 = self._connector.get_ohlcv(symbol, timeframe, 2)
+        if df2 is None or df2.empty:
+            return None
+        # sort ascending trong get_ohlcv: iloc[-2] = nến đã đóng, iloc[-1] = nến đang hình thành
+        if len(df2) >= 2:
+            completed = df2.iloc[-2]
+        else:
+            completed = df2.iloc[-1]
+        ct = pd.Timestamp(completed["timestamp"])
+        prev = self._mt5_last_closed_ts.get(key)
+
+        if prev is None:
+            self._mt5_last_closed_ts[key] = ct
+            logger.info(
+                "MT5 %s %s: neo nến đóng baseline ts=%s (chưa gọi strategy)",
+                symbol,
+                timeframe,
+                ct,
+            )
+            return None
+
+        if ct > prev:
+            self._mt5_last_closed_ts[key] = ct
+            return completed
+        return None
+
+    def _mt5_merge_closed_bar(self, key: tuple[str, str], completed: pd.Series) -> None:
+        """Gộp nến đóng vào buffer: cùng timestamp → thay hàng cuối (chốt OHLC); mới hơn → append."""
+        ct = pd.Timestamp(completed["timestamp"])
+        with self._data_lock:
+            df = self._data.get(key, pd.DataFrame())
+            if df.empty:
+                self._data[key] = pd.DataFrame([completed])
+                return
+            last_ts = pd.Timestamp(df.iloc[-1]["timestamp"])
+            if last_ts == ct:
+                df = pd.concat(
+                    [df.iloc[:-1], pd.DataFrame([completed])], ignore_index=True
+                )
+            elif last_ts < ct:
+                df = pd.concat([df, pd.DataFrame([completed])], ignore_index=True)
+            else:
+                logger.warning(
+                    "MT5 merge: bỏ qua — completed ts %s <= last row %s",
+                    ct,
+                    last_ts,
+                )
+                return
+            df = self._trim_buffer_spill(key, df)
+            self._data[key] = df
+
+    def _trim_buffer_spill(self, key: tuple[str, str], df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Giữ tối đa ``_buffer_max_bars`` hàng trong RAM.
+        Nếu vượt: ghi các hàng cũ nhất ra CSV (append) rồi cắt — tránh mất dữ liệu và OOM khi chạy lâu.
+        """
+        max_b = self._buffer_max_bars
+        if len(df) <= max_b:
+            return df
+        n_drop = len(df) - max_b
+        head = df.iloc[:n_drop].copy()
+        rest = df.iloc[n_drop:].reset_index(drop=True)
+        if self._buffer_spill_enabled and not head.empty:
+            self._append_buffer_to_spill_file(key, head)
+        else:
+            logger.debug(
+                "Buffer trim %s %s: drop %d oldest rows (spill disabled)",
+                key[0],
+                key[1],
+                n_drop,
+            )
+        return rest
+
+    def _spill_csv_path(self, key: tuple[str, str]) -> Path:
+        sym = re.sub(r"[^\w.\-]+", "_", str(key[0]))
+        tf = re.sub(r"[^\w.\-]+", "_", str(key[1]))
+        return self._buffer_spill_dir / f"{sym}_{tf}_buffer.csv"
+
+    def _append_buffer_to_spill_file(
+        self, key: tuple[str, str], rows: pd.DataFrame
+    ) -> None:
+        """Append OHLCV rows to per-(symbol,timeframe) CSV under buffer_spill_dir."""
+        path = self._spill_csv_path(key)
+        try:
+            self._buffer_spill_dir.mkdir(parents=True, exist_ok=True)
+            write_header = not path.exists()
+            with self._spill_write_lock:
+                rows.to_csv(
+                    path,
+                    mode="a",
+                    header=write_header,
+                    index=False,
+                )
+            logger.debug(
+                "Buffer spill: +%d rows → %s (RAM cap=%d)",
+                len(rows),
+                path,
+                self._buffer_max_bars,
+            )
+        except OSError as exc:
+            logger.error("Buffer spill failed (%s): %s — keeping data in memory only", path, exc)
+            # Không raise: tránh dừng stream; RAM có thể tăng nếu spill lỗi lặp lại
+
+    def _stream_loop_mt5(
+        self,
+        symbol: str,
+        timeframe: str,
+        key: tuple[str, str],
+        wait_sec: float,
+        tf_sec: int,
+    ) -> None:
+        """
+        Luồng MT5: poll mỗi `wait_sec` (mặc định 1s), mỗi lần gọi API lấy 2 nến;
+        khi nến đã đóng mới (theo open time) → cập nhật DataFrame + callback strategy.
+        """
+        self._mt5_init_closed_anchor(key)
+        bar_counter = 0
+        poll_num = 0
+        logger.info(
+            "Stream loop MT5 %s %s: poll=%.3fs (~%.0fs/nến %s) — chờ nến *đóng* rồi mới tính strategy",
+            symbol,
+            timeframe,
+            wait_sec,
+            tf_sec,
+            timeframe,
+        )
+        while not self._stop_event.is_set():
+            try:
+                new_closed = self._mt5_poll_new_closed_bar(symbol, timeframe, key)
+                bar_counter += 1
+                poll_num += 1
+                appended = new_closed is not None
+                if new_closed is not None:
+                    self._mt5_merge_closed_bar(key, new_closed)
+                    df_snapshot = self.get_data(symbol, timeframe)
+                    self._fire_callbacks(symbol, timeframe, df_snapshot)
+
+                logger.debug(
+                    "MT5 poll %s %s #%d new_closed=%s ts=%s",
+                    symbol,
+                    timeframe,
+                    poll_num,
+                    appended,
+                    new_closed["timestamp"] if new_closed is not None else None,
+                )
+                if (
+                    self._poll_log_every_n > 0
+                    and poll_num % self._poll_log_every_n == 0
+                ):
+                    logger.info(
+                        "MT5 poll heartbeat %s %s #%d wait=%.3fs new_closed=%s",
+                        symbol,
+                        timeframe,
+                        poll_num,
+                        wait_sec,
+                        appended,
+                    )
+            except Exception:
+                logger.exception("Error in MT5 stream loop %s %s", symbol, timeframe)
+
+            self._stop_event.wait(timeout=max(0.0, wait_sec))
+
+        logger.debug("MT5 stream loop stopped: %s %s", symbol, timeframe)
+
     def _fetch_latest_bar(
         self, symbol: str, timeframe: str, bar_index: int
     ) -> pd.Series | None:
         """Get one new bar — from MT5, mock CSV replay, or synthetic mock."""
         if self._connector and hasattr(self._connector, "get_ohlcv"):
+            # MT5 không dùng nhánh này — luồng thật nằm ở _stream_loop_mt5
             df = self._connector.get_ohlcv(symbol, timeframe, 1)
             return df.iloc[-1] if not df.empty else None
 
@@ -331,8 +546,7 @@ class DataManager:
             df = self._data.get(key, pd.DataFrame())
             new_row = pd.DataFrame([bar])
             df = pd.concat([df, new_row], ignore_index=True)
-            # Keep rolling window to avoid unbounded memory growth
-            df = df.tail(5000).reset_index(drop=True)
+            df = self._trim_buffer_spill(key, df)
             self._data[key] = df
 
     def _fire_callbacks(

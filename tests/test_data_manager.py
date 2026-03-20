@@ -130,3 +130,104 @@ class TestDataManager:
         dm.stop()
 
         assert len(received) >= 1
+
+
+class TestMT5MergeClosedBar:
+    """Logic buffer MT5 (không cần Windows / MetaTrader5)."""
+
+    def test_merge_replace_same_timestamp_final_ohlc(self):
+        dm = DataManager(SAMPLE_CONFIG)
+        key = ("XAUUSD", "H1")
+        ts = pd.Timestamp("2024-01-01 10:00:00", tz="UTC")
+        dm._data[key] = pd.DataFrame(
+            [
+                {
+                    "timestamp": ts,
+                    "open": 1.0,
+                    "high": 1.5,
+                    "low": 0.9,
+                    "close": 1.2,
+                    "volume": 10,
+                }
+            ]
+        )
+        final = pd.Series(
+            {
+                "timestamp": ts,
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.8,
+                "close": 1.9,
+                "volume": 99,
+            }
+        )
+        dm._mt5_merge_closed_bar(key, final)
+        out = dm.get_data("XAUUSD", "H1")
+        assert len(out) == 1
+        assert float(out.iloc[-1]["close"]) == 1.9
+        assert float(out.iloc[-1]["high"]) == 2.0
+
+    def test_merge_append_newer_bar(self):
+        dm = DataManager(SAMPLE_CONFIG)
+        key = ("XAUUSD", "H1")
+        t1 = pd.Timestamp("2024-01-01 10:00:00", tz="UTC")
+        t2 = pd.Timestamp("2024-01-01 11:00:00", tz="UTC")
+        dm._data[key] = pd.DataFrame(
+            [
+                {
+                    "timestamp": t1,
+                    "open": 1.0,
+                    "high": 1.1,
+                    "low": 0.9,
+                    "close": 1.05,
+                    "volume": 10,
+                }
+            ]
+        )
+        nxt = pd.Series(
+            {
+                "timestamp": t2,
+                "open": 1.05,
+                "high": 1.2,
+                "low": 1.0,
+                "close": 1.15,
+                "volume": 20,
+            }
+        )
+        dm._mt5_merge_closed_bar(key, nxt)
+        out = dm.get_data("XAUUSD", "H1")
+        assert len(out) == 2
+        assert pd.Timestamp(out.iloc[-1]["timestamp"]) == t2
+
+
+class TestBufferSpillToDisk:
+    def test_spill_old_rows_to_csv(self, tmp_path):
+        cfg = {
+            **SAMPLE_CONFIG,
+            "data": {
+                **SAMPLE_CONFIG["data"],
+                "buffer_max_bars": 3,
+                "buffer_spill_enabled": True,
+                "buffer_spill_dir": str(tmp_path),
+            },
+        }
+        dm = DataManager(cfg)
+        for i in range(5):
+            ts = pd.Timestamp(f"2024-01-{10 + i:02d} 10:00:00", tz="UTC")
+            row = pd.Series(
+                {
+                    "timestamp": ts,
+                    "open": float(i),
+                    "high": float(i) + 1,
+                    "low": float(i) - 0.5,
+                    "close": float(i) + 0.5,
+                    "volume": 100 + i,
+                }
+            )
+            dm._append_bar("XAUUSD", "H1", row)
+        out = dm.get_data("XAUUSD", "H1")
+        assert len(out) == 3
+        spill = tmp_path / "XAUUSD_H1_buffer.csv"
+        assert spill.exists()
+        dumped = pd.read_csv(spill)
+        assert len(dumped) == 2

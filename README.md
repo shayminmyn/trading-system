@@ -25,6 +25,18 @@ Tài liệu chi tiết (yêu cầu, thiết kế, lộ trình): [`docs/ai/`](doc
 - **MetaTrader 5** + thư viện `MetaTrader5`: chỉ trên **Windows** khi cần dữ liệu live thật
 - Trên **macOS/Linux**: dùng `fallback_source: mock` hoặc CSV trong `data/historical/`
 
+### Windows — dữ liệu live từ MT5
+
+1. Cài **MetaTrader 5** (bản broker), mở terminal và **đăng nhập** tài khoản (để Python gắn vào terminal đang chạy).
+2. Trong MT5: **View → Market Watch** — thêm symbol bạn trade (tên phải **trùng** `trading_pairs.symbol` trong `config.yaml`, ví dụ `XAUUSDm` nếu broker đặt tên vậy).
+3. Tạo env Python (Miniconda), rồi cài API: `pip install MetaTrader5` (thư viện chỉ hỗ trợ Windows).
+4. Trong `config.yaml`:
+   - **`mt5`**: `login`, `password`, `server` đúng với tài khoản (server y hệt trong MT5 khi chọn tài khoản).
+   - **`data.fallback_source`**: đặt **`mt5`** (hoặc bất kỳ chuỗi nào **khác** `mock`) — nếu để `mock` thì hệ thống **không** kết nối MT5 dù đã cấu hình.
+5. Chạy: `python main.py` (terminal MT5 vẫn mở).
+
+Có thể đưa mật khẩu ra biến môi trường: `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER` (xem `ConfigLoader`).
+
 ---
 
 ## Cài đặt nhanh
@@ -59,7 +71,7 @@ Sao chép từ `config.example.yaml` và chỉnh:
 - **`risk_management`**: số dư, % rủi ro mỗi lệnh, RR, min/max lot
 - **`mt5`**: login, password, server (chỉ khi dùng MT5 trên Windows)
 - **`telegram`**: `bot_token`, `chat_id` (user / nhóm / **kênh** `-100…` — bot phải là admin kênh), `cooldown_seconds`, `stop_after_first_signal` (dừng `main.py` sau khi gửi tín hiệu đầu — tiện test); override qua `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-- **`data`**: `historical_dir`, `warmup_bars`, `fallback_source`, `poll_interval_seconds`; với **mock replay**: `mock_replay_from_historical`, `mock_replay_max_bars` (vd. 2000 nến mới nhất), `mock_replay_seed_bars` (vd. 200 nến nạp sẵn rồi stream tiếp đến hết)
+- **`data`**: `historical_dir`, `warmup_bars`, **`fallback_source`** — trên Windows dùng MT5 thật thì đặt **`mt5`** (mọi giá trị khác `"mock"` đều cho phép kết nối MT5); `poll_interval_seconds`; **buffer**: `buffer_max_bars` (giới hạn nến trong RAM), `buffer_spill_enabled`, `buffer_spill_dir` — khi vượt giới hạn, nến cũ được **append** ra CSV để tránh OOM; với **mock replay**: `mock_replay_from_historical`, `mock_replay_max_bars`, `mock_replay_seed_bars`
 - **`backtest`**: vốn ban đầu, slippage, thư mục kết quả
 
 **Không commit** `config.yaml` chứa mật khẩu/token thật (đã có trong `.gitignore`).
