@@ -173,6 +173,8 @@ class ReportGenerator:
             vol_str    = f"{vol:.2f}" if not is_expired else "—"
             sl_str     = fp(t["sl"])  if not is_expired else "—"
             tp_str     = fp(t["tp"])  if not is_expired else "—"
+            ex_ts    = t.get("exit_timestamp")
+            exit_str = fmt_ts(ex_ts) if ex_ts is not None else "—"
             otype      = t.get("order_type", "")
             otype_badge = (
                 "<span style='font-size:0.75em;color:#8ab4f8;margin-left:3px'>[L]</span>"
@@ -187,6 +189,7 @@ class ReportGenerator:
                 f"<td style='color:#00d4aa'>{tp_str}</td>"
                 f"<td style='color:#8ab4f8'>{vol_str}</td>"
                 f"<td style='color:{res_color}'><b>{result}</b></td>"
+                f"<td style='color:#a8c7ff;font-size:0.92em'>{exit_str}</td>"
                 f"<td style='color:{pnl_color}'><b>{pnl_str}</b></td>"
                 f"<td style='color:#cccccc'>{bal_str}</td>"
                 f"</tr>"
@@ -245,14 +248,15 @@ class ReportGenerator:
   <span style="color:#8ab4f8">■</span> Volume (lot) &nbsp;|&nbsp;
   <span style="color:#8ab4f8">[L]</span> = Limit order entry &nbsp;|&nbsp;
   P&amp;L and Balance in USD &nbsp;|&nbsp;
+  <b>Exit</b> = thời điểm nến chạm TP/SL (hoặc hết hạn lệnh) &nbsp;|&nbsp;
   Data source: UTC+0 → displayed as UTC+7
 </p>
 {expired_note}
 <table>
 <tr>
-  <th>Time (UTC+7)</th><th>Dir</th><th>Entry</th>
+  <th>Entry time (UTC+7)</th><th>Dir</th><th>Entry</th>
   <th>SL</th><th>TP</th><th>Vol(lot)</th>
-  <th>Result</th><th>P&amp;L (USD)</th><th>Balance</th>
+  <th>Result</th><th>Exit TP/SL (UTC+7)</th><th>P&amp;L (USD)</th><th>Balance</th>
 </tr>
 {rows}
 </table>

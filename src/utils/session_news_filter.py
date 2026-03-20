@@ -106,6 +106,37 @@ def _load_news_datetimes(path_str: str | None) -> list[datetime]:
     return out
 
 
+def is_friday_week_close_blackout(
+    bar_timestamp: Any, session_filters: dict[str, Any] | None
+) -> bool:
+    """
+    True if the bar falls in the Friday "last N hours before weekly close" window.
+
+    Uses the same parameters as session_filters (UTC):
+      friday_avoid_hours_before_week_close, friday_week_close_hour_utc,
+      friday_week_close_minute_utc.
+
+    Does **not** check session_filters.enabled — callers use this for backtest
+    limit cancellation even when entry blocking is configured separately.
+    """
+    if not session_filters:
+        return False
+    avoid_h = int(session_filters.get("friday_avoid_hours_before_week_close", 0) or 0)
+    if avoid_h <= 0:
+        return False
+
+    dt = _to_utc(bar_timestamp)
+    if dt is None or dt.weekday() != 4:  # Friday
+        return False
+
+    close_h = int(session_filters.get("friday_week_close_hour_utc", 21))
+    close_m = int(session_filters.get("friday_week_close_minute_utc", 0))
+    close_sec = close_h * 3600 + close_m * 60
+    start_sec = close_sec - avoid_h * 3600
+    bar_sec = dt.hour * 3600 + dt.minute * 60 + dt.second
+    return start_sec <= bar_sec < close_sec
+
+
 def is_entry_allowed(bar_timestamp: Any, session_filters: dict[str, Any]) -> bool:
     """
     Return False if entries should be blocked at this bar's open/close time.
@@ -127,16 +158,8 @@ def is_entry_allowed(bar_timestamp: Any, session_filters: dict[str, Any]) -> boo
             return False
 
     # ── Friday: last N hours before weekly close ───────────────────────────
-    avoid_h = int(session_filters.get("friday_avoid_hours_before_week_close", 0) or 0)
-    if avoid_h > 0:
-        close_h = int(session_filters.get("friday_week_close_hour_utc", 21))
-        close_m = int(session_filters.get("friday_week_close_minute_utc", 0))
-        if dt.weekday() == 4:  # Friday
-            close_sec = close_h * 3600 + close_m * 60
-            start_sec = close_sec - avoid_h * 3600
-            bar_sec = dt.hour * 3600 + dt.minute * 60 + dt.second
-            if start_sec <= bar_sec < close_sec:
-                return False
+    if is_friday_week_close_blackout(dt, session_filters):
+        return False
 
     # ── News: ± margin around each HIGH event ──────────────────────────────
     margin_h = float(session_filters.get("news_margin_hours", 1.0) or 0.0)

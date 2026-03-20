@@ -20,6 +20,7 @@ import pandas as pd
 
 from ..utils.logger import get_logger
 from ..utils.gil_info import get_optimal_workers
+from ..utils.session_news_filter import is_friday_week_close_blackout
 from ..utils.tz_utils import fmt_ts
 
 if TYPE_CHECKING:
@@ -75,11 +76,13 @@ class BacktestResult:
             bal   = t.get("balance_after", 0.0)
             sign  = "+" if pnl >= 0 else ""
             otype = t.get("order_type", "MKT")[:3]
+            ex_ts = t.get("exit_timestamp")
+            ex_str = fmt_ts(ex_ts) if ex_ts is not None else "—"
             preview_lines += (
                 f"  {fmt_ts(t['timestamp'])}  {t['action']:4s}[{otype}]"
                 f"  entry={fp(t['entry'])}  SL={fp(t['sl'])}  TP={fp(t['tp'])}"
                 f"  vol={t.get('volume',0):.2f}L"
-                f"  → {t['result']:4s}  P&L={sign}${pnl:.2f}"
+                f"  → {t['result']:4s} @{ex_str}  P&L={sign}${pnl:.2f}"
                 f"  bal=${bal:,.2f}\n"
             )
 
@@ -126,6 +129,15 @@ class BacktestEngine:
         self._commission_pct: float = float(bt.get("commission_percent", 0.0))
         self._slippage_pips: float = float(bt.get("slippage_pips", 2))
         self._workers: int = get_optimal_workers(config.get("concurrency", {}).get("strategy_workers", 4))
+        # Same dict as strategies — used for Friday week-close window (UTC) as in session_filters.
+        self._session_filters: dict = dict(config.get("session_filters") or {})
+        # Cancel unfilled LIMITs when a bar falls in Friday [close−Nh, close) (see
+        # friday_avoid_hours_before_week_close + friday_week_close_*_utc).
+        self._cancel_limit_friday_close: bool = bool(
+            bt.get("cancel_pending_limits_in_friday_close_window", False)
+        )
+        # True: lot size uses % of current equity (realized PnL only). False: always initial_cash.
+        self._risk_on_equity: bool = bool(bt.get("risk_on_equity", True))
 
     def run(
         self,
@@ -252,9 +264,33 @@ class BacktestEngine:
             return 9.09
         return 10.0
 
-    def _calc_lot(self, sl_pips: float, symbol: str, risk_pct: float) -> float:
-        """Calculate position size in lots using % risk model."""
-        risk_amount = self._initial_capital * risk_pct / 100.0
+    def _equity_before_entry_bar(self, trades: list[dict], entry_bar: int, symbol: str) -> float:
+        """
+        Account balance before opening at `entry_bar`: initial cash plus realized P&L
+        from trades that closed strictly before this bar (no floating P&L).
+        """
+        eq = float(self._initial_capital)
+        pv = self._pip_value_per_lot(symbol)
+        for t in trades:
+            if t.get("result") == "EXPIRED":
+                continue
+            if int(t.get("exit_bar", -1)) < int(entry_bar):
+                eq += float(t.get("volume", 0.01)) * float(t.get("pips", 0.0)) * pv
+        return max(eq, 1e-6)
+
+    def _calc_lot(
+        self,
+        sl_pips: float,
+        symbol: str,
+        risk_pct: float,
+        *,
+        balance: float | None = None,
+    ) -> float:
+        """Calculate position size in lots using % risk model on balance (equity) or initial cash."""
+        cap = float(self._initial_capital)
+        if self._risk_on_equity and balance is not None:
+            cap = max(float(balance), 1e-6)
+        risk_amount = cap * risk_pct / 100.0
         pv = self._pip_value_per_lot(symbol)
         if sl_pips <= 0 or pv <= 0:
             return 0.01
@@ -266,6 +302,14 @@ class BacktestEngine:
     # Default limit-order expiry (bars) when signal does not specify one
     _DEFAULT_LIMIT_EXPIRY = 10
 
+    @staticmethod
+    def _timestamp_at_bar(df: pd.DataFrame, bar_index: int):
+        """Safe bar index → timestamp for reports (exit / expiry time)."""
+        if df.empty:
+            return None
+        i = int(min(max(0, bar_index), len(df) - 1))
+        return df.iloc[i]["timestamp"]
+
     def _find_limit_fill(
         self,
         df: pd.DataFrame,
@@ -273,12 +317,15 @@ class BacktestEngine:
         action: str,
         limit_price: float,
         expiry_bars: int,
-    ) -> tuple[int, float]:
+    ) -> tuple[int, float, int]:
         """
         Scan forward for a limit-order fill.
 
-        Returns (fill_bar_index, actual_fill_price).
-        Returns (-1, 0.0) if the order expires unfilled.
+        Returns (fill_bar_index, actual_fill_price, expiry_bar_index).
+
+        On success: expiry_bar_index is -1 (unused) — fill_bar_index is the fill bar.
+        On expiry: fill_bar_index is -1, fill_price = 0.0, expiry_bar_index is the
+        bar index where the order stopped (for exit_timestamp / reporting).
 
         Fill rules:
           BUY  limit: fill when bar low  ≤ limit_price
@@ -286,28 +333,44 @@ class BacktestEngine:
           Gap fills: if open already crossed the limit, fill at open
           (conservative: protects against assuming we always get limit price
            when price gaps through it)
+
+        Friday week close:
+          If cancel_pending_limits_in_friday_close_window is True, any bar inside
+          the same UTC window as session_filters (last N hours before Fri close)
+          cancels the pending limit before checking for a fill on that bar.
         """
+        if start_bar >= len(df):
+            return -1, 0.0, max(0, len(df) - 1)
+
         end_bar = min(start_bar + expiry_bars, len(df))
 
         for i in range(start_bar, end_bar):
+            if self._cancel_limit_friday_close and is_friday_week_close_blackout(
+                df.iloc[i]["timestamp"], self._session_filters
+            ):
+                return -1, 0.0, i
+
             row  = df.iloc[i]
             o, h, l = float(row["open"]), float(row["high"]), float(row["low"])
 
             if action == "BUY":
                 if o <= limit_price:
                     # Price gapped down through the limit — fill at open
-                    return i, o
+                    return i, o, -1
                 if l <= limit_price:
                     # Normal fill at our limit price
-                    return i, limit_price
+                    return i, limit_price, -1
             else:  # SELL
                 if o >= limit_price:
                     # Price gapped up through the limit — fill at open
-                    return i, o
+                    return i, o, -1
                 if h >= limit_price:
-                    return i, limit_price
+                    return i, limit_price, -1
 
-        return -1, 0.0   # expired
+        # Expired after scanning window (no fill)
+        last_tried = end_bar - 1 if end_bar > start_bar else start_bar - 1
+        last_tried = max(0, last_tried)
+        return -1, 0.0, last_tried
 
     def _simulate_trades(
         self,
@@ -364,12 +427,13 @@ class BacktestEngine:
 
             # ── LIMIT order path ──────────────────────────────────────────────
             if limit_price > 0:
-                fill_bar, fill_price = self._find_limit_fill(
+                fill_bar, fill_price, limit_expiry_bar = self._find_limit_fill(
                     df, sig_bar + 1, action, limit_price, expiry
                 )
 
                 if fill_bar < 0:
                     # Order expired without fill — record but exclude from metrics
+                    exp_bar = int(limit_expiry_bar)
                     trades.append({
                         "bar_index":   sig_bar,
                         "timestamp":   sig["timestamp"],
@@ -381,12 +445,13 @@ class BacktestEngine:
                         "sl_pips":     sl_pips_sig,
                         "volume":      0.0,
                         "result":      "EXPIRED",
-                        "exit_bar":    sig_bar + expiry,
+                        "exit_bar":    exp_bar,
                         "exit_price":  0.0,
                         "pips":        0.0,
+                        "exit_timestamp": self._timestamp_at_bar(df, exp_bar),
                     })
-                    # Expired limit still occupied its slot during the wait window
-                    active_end_bars.append(sig_bar + expiry)
+                    # Expired limit still occupied its slot until expiry / weekend cancel
+                    active_end_bars.append(exp_bar)
                     used_signal_bars.add(sig_bar)
                     continue
 
@@ -414,7 +479,8 @@ class BacktestEngine:
                     sl_price = entry + sl_dist
                     tp_price = entry - tp_dist
 
-                volume  = self._calc_lot(actual_sl_pips, symbol, risk_pct)
+                bal = self._equity_before_entry_bar(trades, fill_bar, symbol)
+                volume  = self._calc_lot(actual_sl_pips, symbol, risk_pct, balance=bal)
                 outcome = self._find_outcome(
                     df, fill_bar + 1, action, sl_price, tp_price, pip_size, entry_price=entry,
                 )
@@ -433,6 +499,7 @@ class BacktestEngine:
                     "exit_bar":    outcome["exit_bar"],
                     "exit_price":  outcome["exit_price"],
                     "pips":        outcome["pips"],
+                    "exit_timestamp": self._timestamp_at_bar(df, outcome["exit_bar"]),
                 })
                 active_end_bars.append(outcome["exit_bar"])
                 used_signal_bars.add(sig_bar)
@@ -452,9 +519,11 @@ class BacktestEngine:
                     sl_price  = entry + sl_dist
                     tp_price  = entry - tp_dist
 
-                volume  = self._calc_lot(sl_pips_sig, symbol, risk_pct)
+                entry_bar = sig_bar + 1
+                bal = self._equity_before_entry_bar(trades, entry_bar, symbol)
+                volume  = self._calc_lot(sl_pips_sig, symbol, risk_pct, balance=bal)
                 outcome = self._find_outcome(
-                    df, sig_bar + 1, action, sl_price, tp_price, pip_size, entry_price=entry,
+                    df, entry_bar, action, sl_price, tp_price, pip_size, entry_price=entry,
                 )
 
                 trades.append({
@@ -471,6 +540,7 @@ class BacktestEngine:
                     "exit_bar":    outcome["exit_bar"],
                     "exit_price":  outcome["exit_price"],
                     "pips":        outcome["pips"],
+                    "exit_timestamp": self._timestamp_at_bar(df, outcome["exit_bar"]),
                 })
                 active_end_bars.append(outcome["exit_bar"])
                 used_signal_bars.add(sig_bar)

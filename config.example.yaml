@@ -66,6 +66,9 @@ strategies:
     swing_lookback: 60              # Bars scanned for swing-point detection
     swing_strength: 3               # Bars each side required to confirm swing
     min_swing_separation_bars: 10   # Min bars between đỉnh1–đỉnh2 / đáy1–đáy2 (0 = tắt)
+    max_swing_separation_bars: 18   # Max gap (~10–15 on chart); 0 = unlimited
+    require_clean_segment_between_swings: true  # No interior high above High2 / low below Low2
+    require_swing2_curr_or_prev: false  # true = Low2/High2 only on curr/prev bar
     sl_buffer_atr: 0.3              # ATR padding on SL (placed at High1/Low1)
     min_rr: 1.5                     # Minimum estimated reward-to-risk ratio
     # ── Limit-order entry (Phân kỳ ẩn + retest) ───────────────────────────────
@@ -137,6 +140,11 @@ backtest:
   commission_percent: 0.0       # 0 for Forex (spread-based)
   slippage_pips: 2              # Slippage simulation
   output_dir: "backtest_results"
+  # % risk tính trên equity hiện tại (initial + PnL đã chốt), không cố định initial_cash
+  risk_on_equity: true
+  # Hủy LIMIT chưa khớp khi nến nằm trong khung cuối phiên Thứ Sáu (UTC, giống session_filters)
+  # — cần session_filters.friday_avoid_hours_before_week_close > 0
+  cancel_pending_limits_in_friday_close_window: false
 
 # ── Concurrency ───────────────────────────────────────────────────────────────
 concurrency:
