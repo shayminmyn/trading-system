@@ -14,7 +14,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import pandas as pd
@@ -50,8 +50,18 @@ class DataManager:
         data_cfg = config.get("data", {})
         self._warmup_bars: int = data_cfg.get("warmup_bars", 200)
         self._poll_interval: float = data_cfg.get("poll_interval_seconds", 1.0)
+        # When using mock (no MT5), optional shorter wait between bars for quick Telegram/tests.
+        # Example: 0.05 → ~20 bars/sec. If unset, uses poll_interval_seconds.
+        mp = data_cfg.get("mock_poll_interval_seconds")
+        self._mock_poll_interval: float | None = float(mp) if mp is not None else None
+        # INFO log every N poll iterations (0 = no INFO heartbeat; use DEBUG for each poll).
+        self._poll_log_every_n: int = max(0, int(data_cfg.get("poll_log_every_n", 20)))
         self._fallback: str = data_cfg.get("fallback_source", "mock")
         self._hist_dir: str = data_cfg.get("historical_dir", "data/historical")
+        # Mock + CSV replay: last N bars from data/historical, seed first M bars, stream the rest.
+        self._mock_replay_enabled: bool = bool(data_cfg.get("mock_replay_from_historical", True))
+        self._mock_replay_max_bars: int = max(1, int(data_cfg.get("mock_replay_max_bars", 2000)))
+        self._mock_replay_seed_bars: int = max(1, int(data_cfg.get("mock_replay_seed_bars", 200)))
 
         # DataFrame store: key = (symbol, timeframe)
         self._data: dict[tuple[str, str], pd.DataFrame] = {}
@@ -64,6 +74,8 @@ class DataManager:
         self._stop_event = threading.Event()
         self._connector = None
         self._historical_loader = HistoricalLoader(self._hist_dir)
+        # Remaining OHLCV rows to append in mock replay mode (per stream thread).
+        self._replay_remaining: dict[tuple[str, str], pd.DataFrame] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -151,6 +163,46 @@ class DataManager:
         try:
             if self._connector and hasattr(self._connector, "get_ohlcv"):
                 df = self._connector.get_ohlcv(symbol, timeframe, self._warmup_bars)
+            elif self._connector is None and self._mock_replay_enabled:
+                # Mock: replay real CSV — newest window, seed bars, then stream remainder.
+                try:
+                    raw = self._historical_loader.load(symbol, timeframe)
+                    if "timestamp" not in raw.columns:
+                        raise ValueError("historical data missing timestamp column")
+                    raw = raw.sort_values("timestamp").reset_index(drop=True)
+                    win = min(len(raw), self._mock_replay_max_bars)
+                    chunk = raw.tail(win).reset_index(drop=True)
+                    n = len(chunk)
+                    seed_n = min(self._mock_replay_seed_bars, n)
+                    df = chunk.iloc[:seed_n].copy()
+                    rem = chunk.iloc[seed_n:].reset_index(drop=True)
+                    self._replay_remaining[key] = rem
+                    logger.info(
+                        "Mock replay %s %s: window=%d (newest), seed=%d, queued=%d bars to stream",
+                        symbol,
+                        timeframe,
+                        n,
+                        len(df),
+                        len(rem),
+                    )
+                except FileNotFoundError as fnf:
+                    logger.warning(
+                        "Mock replay: %s — falling back to synthetic warmup (%d bars)",
+                        fnf,
+                        self._warmup_bars,
+                    )
+                    from .mock_source import generate_ohlcv
+
+                    df = generate_ohlcv(symbol, timeframe, n_bars=self._warmup_bars)
+                except Exception as exc:
+                    logger.warning(
+                        "Mock replay failed (%s); synthetic warmup (%d bars)",
+                        exc,
+                        self._warmup_bars,
+                    )
+                    from .mock_source import generate_ohlcv
+
+                    df = generate_ohlcv(symbol, timeframe, n_bars=self._warmup_bars)
             else:
                 from .mock_source import generate_ohlcv
                 df = generate_ohlcv(symbol, timeframe, n_bars=self._warmup_bars)
@@ -176,38 +228,102 @@ class DataManager:
         tf_sec = _TIMEFRAME_SECONDS.get(timeframe, 3600)
         last_bar_time: datetime | None = None
         bar_counter = 0
+        is_mock = self._connector is None
+        wait_sec = (
+            self._mock_poll_interval
+            if is_mock and self._mock_poll_interval is not None
+            else self._poll_interval
+        )
 
-        logger.debug("Stream loop started: %s %s", symbol, timeframe)
+        replay_left = len(
+            self._replay_remaining.get((symbol, timeframe), pd.DataFrame())
+        )
+        logger.info(
+            "Stream loop %s %s: poll wait=%.3fs (mock=%s replay_queued=%d)",
+            symbol,
+            timeframe,
+            wait_sec,
+            is_mock,
+            replay_left,
+        )
 
+        poll_num = 0
         while not self._stop_event.is_set():
             try:
                 new_bar = self._fetch_latest_bar(symbol, timeframe, bar_counter)
+                bar_counter += 1
+                poll_num += 1
+                appended = False
                 if new_bar is not None:
                     bar_ts = new_bar["timestamp"]
                     if last_bar_time is None or bar_ts > last_bar_time:
                         self._append_bar(symbol, timeframe, new_bar)
                         last_bar_time = bar_ts
-                        bar_counter += 1
+                        appended = True
                         df_snapshot = self.get_data(symbol, timeframe)
                         self._fire_callbacks(symbol, timeframe, df_snapshot)
+
+                logger.debug(
+                    "poll %s %s #%d fetched=%s appended=%s ts=%s",
+                    symbol,
+                    timeframe,
+                    poll_num,
+                    new_bar is not None,
+                    appended,
+                    new_bar["timestamp"] if new_bar is not None else None,
+                )
+                if (
+                    self._poll_log_every_n > 0
+                    and poll_num % self._poll_log_every_n == 0
+                ):
+                    logger.info(
+                        "poll heartbeat %s %s #%d wait=%.3fs fetched=%s appended=%s",
+                        symbol,
+                        timeframe,
+                        poll_num,
+                        wait_sec,
+                        new_bar is not None,
+                        appended,
+                    )
             except Exception:
                 logger.exception("Error in stream loop %s %s", symbol, timeframe)
 
-            self._stop_event.wait(timeout=self._poll_interval)
+            self._stop_event.wait(timeout=max(0.0, wait_sec))
 
         logger.debug("Stream loop stopped: %s %s", symbol, timeframe)
 
     def _fetch_latest_bar(
         self, symbol: str, timeframe: str, bar_index: int
     ) -> pd.Series | None:
-        """Get one new bar — from MT5 or mock."""
+        """Get one new bar — from MT5, mock CSV replay, or synthetic mock."""
         if self._connector and hasattr(self._connector, "get_ohlcv"):
             df = self._connector.get_ohlcv(symbol, timeframe, 1)
             return df.iloc[-1] if not df.empty else None
-        else:
-            from .mock_source import generate_ohlcv
-            df = generate_ohlcv(symbol, timeframe, n_bars=1, seed=bar_index)
-            return df.iloc[0]
+
+        key = (symbol, timeframe)
+        if key in self._replay_remaining:
+            rem = self._replay_remaining[key]
+            if rem is not None and len(rem) > 0:
+                row = rem.iloc[0]
+                self._replay_remaining[key] = rem.iloc[1:].reset_index(drop=True)
+                if len(self._replay_remaining[key]) == 0:
+                    logger.info(
+                        "Mock replay finished for %s %s (all queued bars streamed)",
+                        symbol,
+                        timeframe,
+                    )
+                return row
+            # Replay finished — no more bars until restart
+            return None
+
+        from .mock_source import generate_ohlcv
+
+        # Synthetic mock: monotonic bar time so each poll produces a new closed bar.
+        end_time = datetime.now(timezone.utc) + timedelta(microseconds=bar_index)
+        df = generate_ohlcv(
+            symbol, timeframe, n_bars=1, seed=bar_index, end_time=end_time
+        )
+        return df.iloc[0]
 
     def _append_bar(self, symbol: str, timeframe: str, bar: pd.Series) -> None:
         key = (symbol, timeframe)

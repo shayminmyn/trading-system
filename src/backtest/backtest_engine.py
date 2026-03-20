@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import concurrent.futures
 import threading
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -46,6 +48,7 @@ class BacktestResult:
     winrate: float          # 0–100 %
     total_return_pct: float
     max_drawdown_pct: float
+    max_drawdown_daily_pct: float  # worst single-calendar-day DD % (see daily_drawdown_tz)
     sharpe_ratio: float
     profit_factor: float
     avg_win_pips: float
@@ -94,8 +97,9 @@ class BacktestResult:
             f"{'─'*70}\n"
             f"  Capital      : ${self.initial_capital:,.2f} → ${self.final_equity:,.2f}"
             f"  ({self.total_return_pct:+.2f}%)\n"
-            f"  Min Balance  : ${self.min_balance:,.2f}  |  Max Balance : ${self.max_balance:,.2f}\n"
-            f"  Max Drawdown : {self.max_drawdown_pct:.2f}%\n"
+            f"  Min total $  : ${self.min_balance:,.2f}  |  Max total $ : ${self.max_balance:,.2f}\n"
+            f"  Max Drawdown : {self.max_drawdown_pct:.2f}%  "
+            f"(daily max: {self.max_drawdown_daily_pct:.2f}%)\n"
             f"  Sharpe Ratio : {self.sharpe_ratio:.3f}\n"
             f"  Profit Factor: {self.profit_factor:.2f}\n"
             f"  Winrate      : {self.winrate:.1f}%  "
@@ -138,6 +142,8 @@ class BacktestEngine:
         )
         # True: lot size uses % of current equity (realized PnL only). False: always initial_cash.
         self._risk_on_equity: bool = bool(bt.get("risk_on_equity", True))
+        # Calendar day boundary for max intraday drawdown (IANA tz, e.g. Asia/Ho_Chi_Minh).
+        self._daily_drawdown_tz: str = str(bt.get("daily_drawdown_tz", "Asia/Ho_Chi_Minh"))
 
     def run(
         self,
@@ -596,6 +602,63 @@ class BacktestEngine:
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _max_drawdown_daily_pct(
+        active_trades: list[dict],
+        equity_curve: list[float],
+        tz_name: str,
+    ) -> float:
+        """
+        Maximum drawdown (%) occurring within a single calendar day in `tz_name`.
+
+        Equity updates at trade exit; each day we take [equity at start of day,
+        ...equity after each close that day] and measure peak-to-trough DD within
+        that sequence. Return the worst such daily DD across the backtest.
+        """
+        if not active_trades or len(equity_curve) < 2:
+            return 0.0
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            logger.warning("Invalid daily_drawdown_tz %r — using UTC", tz_name)
+            tz = ZoneInfo("UTC")
+
+        by_day: dict = defaultdict(list)
+        for i, tr in enumerate(active_trades):
+            ex = tr.get("exit_timestamp")
+            if ex is None:
+                continue
+            t = pd.Timestamp(ex)
+            if t.tzinfo is None:
+                t = t.tz_localize("UTC")
+            else:
+                t = t.tz_convert("UTC")
+            local_date = t.tz_convert(tz).date()
+            eq_after = equity_curve[i + 1]
+            by_day[local_date].append((t, eq_after))
+
+        if not by_day:
+            return 0.0
+
+        sorted_days = sorted(by_day.keys())
+        prev_eod = float(equity_curve[0])
+        overall_max_dd = 0.0
+
+        for d in sorted_days:
+            day_events = sorted(by_day[d], key=lambda x: x[0])
+            seq = [prev_eod]
+            for _, eq in day_events:
+                seq.append(float(eq))
+            peak = seq[0]
+            for eq in seq:
+                peak = max(peak, eq)
+                if peak > 0:
+                    dd = (peak - eq) / peak * 100.0
+                    overall_max_dd = max(overall_max_dd, dd)
+            prev_eod = seq[-1]
+
+        return round(overall_max_dd, 2)
+
     def _compute_metrics(
         self,
         trades: list[dict],
@@ -618,6 +681,7 @@ class BacktestEngine:
                 winrate=0.0,
                 total_return_pct=0.0,
                 max_drawdown_pct=0.0,
+                max_drawdown_daily_pct=0.0,
                 sharpe_ratio=0.0,
                 profit_factor=0.0,
                 avg_win_pips=0.0,
@@ -670,6 +734,10 @@ class BacktestEngine:
         min_bal = float(np.min(equity_curve))
         max_bal = float(np.max(equity_curve))
 
+        max_dd_daily = self._max_drawdown_daily_pct(
+            active_trades, equity_curve, self._daily_drawdown_tz
+        )
+
         return BacktestResult(
             symbol=strategy.symbol,
             timeframe=strategy.timeframe,
@@ -686,6 +754,7 @@ class BacktestEngine:
                 (equity - self._initial_capital) / self._initial_capital * 100, 2
             ),
             max_drawdown_pct=round(max_dd, 2),
+            max_drawdown_daily_pct=max_dd_daily,
             sharpe_ratio=round(sharpe, 3),
             profit_factor=round(profit_factor, 2),
             avg_win_pips=round(np.mean(win_pips), 1) if win_pips else 0.0,

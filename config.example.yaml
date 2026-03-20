@@ -49,10 +49,25 @@ mt5:
   timeout: 60000                # ms
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
+# Bot gửi tín hiệu (HTML): Entry, SL (stop loss), TP1/TP2 (take profit), volume, risk.
+# Override bằng biến môi trường: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 telegram:
-  bot_token: "YOUR_BOT_TOKEN"   # From @BotFather
-  chat_id: "YOUR_CHAT_ID"       # Your user/group chat ID
+  bot_token: "YOUR_BOT_TOKEN"   # Từ @BotFather
+  # chat_id đích nhận tin:
+  # - Chat riêng / nhóm: số ID (vd. dùng @userinfobot)
+  # - Kênh (channel): thêm bot làm Admin (Post messages), rồi dùng ID dạng -100xxxxxxxxxx
+  #   (Forward tin từ kênh tới @getidsbot / @RawDataBot để lấy id) hoặc @ten_kenh_public
+  chat_id: "YOUR_CHAT_ID_OR_CHANNEL_ID"
   parse_mode: "HTML"
+  cooldown_seconds: 60          # Không gửi trùng tín hiệu trong N giây
+  # true = sau khi enqueue tín hiệu Telegram đầu tiên (có SL/TP), dừng main.py (tiện test)
+  stop_after_first_signal: false
+  # Paper / test: sau tín hiệu đầu, theo dõi nến đóng — chạm TP1 hoặc SL (ưu tiên giống backtest)
+  paper_track_tp_sl: false
+  notify_on_tp_hit: true        # Gửi Telegram khi chạm TP (paper)
+  notify_on_sl_hit: false       # Gửi Telegram khi chạm SL (paper)
+  stop_after_tp_hit: false      # true = dừng main sau khi TP (paper)
+  stop_after_sl_hit: false      # true = dừng main sau khi SL (paper)
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 strategies:
@@ -133,6 +148,17 @@ data:
   fallback_source: "mock"
   # Polling interval in seconds when streaming via MT5 copy_rates
   poll_interval_seconds: 1
+  # Mock-only: delay between synthetic bars (default: use poll_interval_seconds).
+  # Set e.g. 0.05 for fast local testing (Telegram / strategy) without waiting for real bar times.
+  # mock_poll_interval_seconds: 0.05
+  # INFO log every N poll iterations (0 = chỉ dùng DEBUG để xem từng poll). Giảm xuống 1 nếu cần log mỗi lần poll.
+  poll_log_every_n: 20
+  # INFO every N bars handed to strategies (main.py). 0 = off. DEBUG: per-bar feed + per-strategy exec.
+  strategy_eval_log_every_n: 20
+  # Mock: replay newest CSV bars — max window, initial seed count, then stream rest (no more bars when done).
+  mock_replay_from_historical: true
+  mock_replay_max_bars: 2000
+  mock_replay_seed_bars: 200
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 backtest:
@@ -145,6 +171,8 @@ backtest:
   # Hủy LIMIT chưa khớp khi nến nằm trong khung cuối phiên Thứ Sáu (UTC, giống session_filters)
   # — cần session_filters.friday_avoid_hours_before_week_close > 0
   cancel_pending_limits_in_friday_close_window: false
+  # Ranh giới “1 ngày” cho max drawdown trong ngày (IANA timezone)
+  daily_drawdown_tz: "Asia/Ho_Chi_Minh"
 
 # ── Concurrency ───────────────────────────────────────────────────────────────
 concurrency:

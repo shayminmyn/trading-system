@@ -69,8 +69,15 @@ class ReportGenerator:
             "final_equity": result.final_equity,
             "min_balance": result.min_balance,
             "max_balance": result.max_balance,
+            "balance_summary_usd": {
+                "initial": result.initial_capital,
+                "final": result.final_equity,
+                "min_total": result.min_balance,
+                "max_total": result.max_balance,
+            },
             "total_return_pct": result.total_return_pct,
             "max_drawdown_pct": result.max_drawdown_pct,
+            "max_drawdown_daily_pct": result.max_drawdown_daily_pct,
             "sharpe_ratio": result.sharpe_ratio,
             "profit_factor": result.profit_factor,
             "winrate": result.winrate,
@@ -219,24 +226,36 @@ class ReportGenerator:
   td {{ padding: 6px 12px; border-bottom: 1px solid #1e2135; font-family: monospace; }}
   tr:hover td {{ background: #1e2135; }}
   .legend {{ font-size: 0.75em; color: #666; margin: 8px 0 16px; }}
+  .balance-summary {{ font-size: 0.95em; color: #c8c8c8; margin: 12px 0 8px; padding: 10px 14px; background: #1a1d2e; border-radius: 8px; border-left: 3px solid #00d4aa; }}
 </style>
 </head>
 <body>
 <h1>Backtest Report</h1>
 <h2>{r.strategy_name} &nbsp;|&nbsp; {r.symbol} / {r.timeframe}</h2>
+<p class="balance-summary">
+  <b>Total balance (USD)</b> — min:
+  <span style="color:#ff8c00;font-weight:bold">${r.min_balance:,.2f}</span>
+  &nbsp;|&nbsp; max:
+  <span style="color:#6abf69;font-weight:bold">${r.max_balance:,.2f}</span>
+  &nbsp;|&nbsp; final:
+  <span style="color:#a8c7ff;font-weight:bold">${r.final_equity:,.2f}</span>
+  &nbsp;|&nbsp; initial:
+  <span style="color:#888">${r.initial_capital:,.2f}</span>
+</p>
 
 <div class="metrics">
   <div class="card"><div class="val">{r.total_return_pct:+.2f}%</div><div class="lbl">Total Return</div></div>
   <div class="card"><div class="val">{r.winrate:.1f}%</div><div class="lbl">Winrate ({r.winning_trades}W / {r.losing_trades}L)</div></div>
   <div class="card"><div class="val">{r.profit_factor:.2f}</div><div class="lbl">Profit Factor</div></div>
-  <div class="card"><div class="val">{r.max_drawdown_pct:.2f}%</div><div class="lbl">Max Drawdown</div></div>
+  <div class="card"><div class="val">{r.max_drawdown_pct:.2f}%</div><div class="lbl">Max drawdown (full period)</div></div>
+  <div class="card"><div class="val" style="color:#ffb347">{r.max_drawdown_daily_pct:.2f}%</div><div class="lbl">Max drawdown (worst calendar day)</div></div>
   <div class="card"><div class="val">{r.sharpe_ratio:.3f}</div><div class="lbl">Sharpe Ratio</div></div>
   <div class="card"><div class="val">{r.avg_win_pips:.1f}</div><div class="lbl">Avg Win (pips)</div></div>
   <div class="card"><div class="val">{r.avg_loss_pips:.1f}</div><div class="lbl">Avg Loss (pips)</div></div>
   <div class="card"><div class="val">{r.total_trades}</div><div class="lbl">Total Trades</div></div>
-  <div class="card"><div class="val">${r.initial_capital:,.0f} → ${r.final_equity:,.2f}</div><div class="lbl">Capital</div></div>
-  <div class="card"><div class="val" style="color:#ff8c00">${r.min_balance:,.2f}</div><div class="lbl">Min Balance</div></div>
-  <div class="card"><div class="val" style="color:#00d4aa">${r.max_balance:,.2f}</div><div class="lbl">Max Balance</div></div>
+  <div class="card"><div class="val">${r.initial_capital:,.0f} → ${r.final_equity:,.2f}</div><div class="lbl">Initial → Final equity</div></div>
+  <div class="card"><div class="val" style="color:#ff8c00">${r.min_balance:,.2f}</div><div class="lbl">Min total balance (USD)</div></div>
+  <div class="card"><div class="val" style="color:#00d4aa">${r.max_balance:,.2f}</div><div class="lbl">Max total balance (USD)</div></div>
   <div class="card"><div class="val" style="color:#00d4aa">+${total_profit:,.2f}</div><div class="lbl">Gross Profit</div></div>
   <div class="card"><div class="val" style="color:#ff4b4b">-${abs(total_loss):,.2f}</div><div class="lbl">Gross Loss</div></div>
 </div>
@@ -270,7 +289,7 @@ class ReportGenerator:
             f"<td style='color:{'#00d4aa' if r.total_return_pct>=0 else '#ff4b4b'}'>{r.total_return_pct:+.2f}%</td>"
             f"<td>${r.min_balance:,.2f}</td>"
             f"<td>${r.max_balance:,.2f}</td>"
-            f"<td>{r.max_drawdown_pct:.2f}%</td>"
+            f"<td>{r.max_drawdown_pct:.2f}% / {r.max_drawdown_daily_pct:.2f}% d</td>"
             f"<td>{r.sharpe_ratio:.3f}</td>"
             f"<td>{r.profit_factor:.2f}</td>"
             f"<td>{r.winrate:.1f}%</td>"
@@ -294,7 +313,7 @@ class ReportGenerator:
 <body>
 <h1>Strategy Comparison Report</h1>
 <table>
-<tr><th>Strategy</th><th>Symbol/TF</th><th>Return</th><th>Min $</th><th>Max $</th><th>Max DD</th><th>Sharpe</th><th>Profit Factor</th><th>Winrate</th><th>Trades</th></tr>
+<tr><th>Strategy</th><th>Symbol/TF</th><th>Return</th><th>Min total $</th><th>Max total $</th><th>Max DD % / 1-day %</th><th>Sharpe</th><th>Profit Factor</th><th>Winrate</th><th>Trades</th></tr>
 {rows}
 </table>
 </body>

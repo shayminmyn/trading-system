@@ -40,6 +40,19 @@
             }
         },
         {
+            "name": "Debug: main",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true,
+            "python": "/opt/anaconda3/envs/trading-system/bin/python",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+        {
             "name": "Debug: backtest (HiddenDivergence XAUUSD H1, Windows)",
             "type": "debugpy",
             "request": "launch",

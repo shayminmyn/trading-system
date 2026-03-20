@@ -58,8 +58,8 @@ Sao chép từ `config.example.yaml` và chỉnh:
 - **`trading_pairs`**: symbol, khung thời gian (`M5`, `M15`, `H1`, `H4`, …), danh sách strategy
 - **`risk_management`**: số dư, % rủi ro mỗi lệnh, RR, min/max lot
 - **`mt5`**: login, password, server (chỉ khi dùng MT5 trên Windows)
-- **`telegram`**: `bot_token`, `chat_id` — có thể override bằng biến môi trường (xem `ConfigLoader`)
-- **`data`**: `historical_dir`, `warmup_bars`, `fallback_source` (`mock` / phù hợp với code), `poll_interval_seconds`
+- **`telegram`**: `bot_token`, `chat_id` (user / nhóm / **kênh** `-100…` — bot phải là admin kênh), `cooldown_seconds`, `stop_after_first_signal` (dừng `main.py` sau khi gửi tín hiệu đầu — tiện test); override qua `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- **`data`**: `historical_dir`, `warmup_bars`, `fallback_source`, `poll_interval_seconds`; với **mock replay**: `mock_replay_from_historical`, `mock_replay_max_bars` (vd. 2000 nến mới nhất), `mock_replay_seed_bars` (vd. 200 nến nạp sẵn rồi stream tiếp đến hết)
 - **`backtest`**: vốn ban đầu, slippage, thư mục kết quả
 
 **Không commit** `config.yaml` chứa mật khẩu/token thật (đã có trong `.gitignore`).
@@ -82,7 +82,7 @@ python main.py
 ```
 
 - Trên Windows với MT5 đã cấu hình: dữ liệu lấy từ terminal MT5 (theo `config.yaml`).
-- Trên macOS/Linux: thường dùng mock/CSV tùy `data.fallback_source`.
+- Trên macOS/Linux: mock có thể **replay** file `data/historical/{SYMBOL}_{TF}.csv` (mới nhất → seed → phát nối tiếp) thay vì OHLCV ngẫu nhiên; tắt bằng `mock_replay_from_historical: false`.
 
 Dừng: `Ctrl+C`.
 

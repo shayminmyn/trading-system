@@ -12,12 +12,11 @@ Features:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import html
 import queue
 import threading
 import time
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..utils.logger import get_logger
@@ -28,27 +27,81 @@ if TYPE_CHECKING:
 logger = get_logger("telegram_notifier")
 
 
+def _pip_size(symbol: str) -> float:
+    """1 pip in price units (same convention as RiskManager)."""
+    sym = symbol.upper()
+    if sym in ("XAUUSD", "XAGUSD"):
+        return 0.10
+    if "JPY" in sym:
+        return 0.01
+    return 0.0001
+
+
+def _price_fmt(symbol: str, price: float) -> str:
+    sym = symbol.upper()
+    if sym in ("XAUUSD", "XAGUSD"):
+        return f"{price:.2f}"
+    if "JPY" in sym:
+        return f"{price:.3f}"
+    return f"{price:.5f}"
+
+
+def _distance_pips(symbol: str, a: float, b: float) -> float:
+    return abs(a - b) / _pip_size(symbol)
+
+
 def _format_signal(signal: "CompleteSignal") -> str:
-    """Build the Telegram HTML-formatted message for a signal."""
+    """Build the Telegram HTML-formatted message for a signal (SL / TP rõ ràng)."""
     action_emoji = "📈" if "BUY" in signal.action else "📉"
-    tp2_line = f"✅ <b>Take Profit 2:</b> {signal.tp2:.5f}\n" if signal.tp2 else ""
+    sym = signal.symbol
+    ep = _price_fmt(sym, signal.entry)
+    sl = _price_fmt(sym, signal.sl)
+    tp1 = _price_fmt(sym, signal.tp1)
+    tp1_pips = _distance_pips(sym, signal.entry, signal.tp1)
+
+    tp2_block = ""
+    if signal.tp2 is not None:
+        tp2 = _price_fmt(sym, signal.tp2)
+        tp2_pips = _distance_pips(sym, signal.entry, signal.tp2)
+        tp2_block = (
+            f"✅ <b>TP2 (Take Profit 2):</b> <code>{tp2}</code> "
+            f"<i>(~{tp2_pips:.0f} pips từ entry)</i>\n"
+        )
+
+    notes_block = ""
+    if signal.notes and str(signal.notes).strip():
+        notes_block = (
+            f"📝 <b>Ghi chú:</b> {html.escape(str(signal.notes)[:800])}\n"
+        )
+
+    ts = signal.timestamp
+    if hasattr(ts, "strftime"):
+        ts_str = ts.strftime("%Y-%m-%d %H:%M UTC")
+    else:
+        ts_str = str(ts)
 
     return (
         "🚨 <b>TÍN HIỆU GIAO DỊCH</b> 🚨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔹 <b>Cặp:</b> {signal.symbol}\n"
-        f"⏱ <b>Khung TG:</b> {signal.timeframe}\n"
-        f"{action_emoji} <b>Lệnh:</b> {signal.action}\n"
+        f"🔹 <b>Cặp:</b> {html.escape(sym)}\n"
+        f"⏱ <b>Khung TG:</b> {html.escape(signal.timeframe)}\n"
+        f"{action_emoji} <b>Lệnh:</b> {html.escape(signal.action)}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Entry:</b> {signal.entry:.5f}\n"
-        f"🛑 <b>Stoploss:</b> {signal.sl:.5f} ({signal.sl_pips:.0f} pips)\n"
-        f"✅ <b>Take Profit 1:</b> {signal.tp1:.5f} <i>(RR 1:{signal.rr_ratio:.1f})</i>\n"
-        f"{tp2_line}"
+        f"💰 <b>Entry (vào lệnh):</b> <code>{ep}</code>\n"
+        "\n"
+        "🛑 <b>SL — Stop Loss (cắt lỗ)</b>\n"
+        f"   └ Giá: <code>{sl}</code>  |  <i>{signal.sl_pips:.0f} pips</i>\n"
+        "\n"
+        "✅ <b>TP — Take Profit (chốt lời)</b>\n"
+        f"   └ <b>TP1:</b> <code>{tp1}</code>  |  "
+        f"<i>~{tp1_pips:.0f} pips</i>  |  RR <b>1:{signal.rr_ratio:.1f}</b>\n"
+        f"{tp2_block}"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚖️ <b>Volume:</b> {signal.volume:.2f} Lot "
-        f"<i>(Risk: {signal.risk_percent:.1f}% / ${signal.risk_amount_usd:.2f})</i>\n"
-        f"🤖 <b>Strategy:</b> {signal.strategy_name}\n"
-        f"🕐 <i>{signal.timestamp.strftime('%Y-%m-%d %H:%M UTC')}</i>"
+        f"⚖️ <b>Volume:</b> {signal.volume:.2f} lot "
+        f"<i>(Risk {signal.risk_percent:.1f}% ≈ ${signal.risk_amount_usd:,.2f})</i>\n"
+        f"🤖 <b>Strategy:</b> {html.escape(signal.strategy_name)}\n"
+        f"{notes_block}"
+        f"🕐 <i>{ts_str}</i>\n"
     )
 
 
@@ -70,9 +123,10 @@ class TelegramNotifier:
         tg = config.get("telegram", {})
         self._token: str = tg.get("bot_token", "")
         self._chat_id: str = str(tg.get("chat_id", ""))
+        self._parse_mode: str = tg.get("parse_mode", "HTML")
         self._enabled: bool = bool(self._token and self._chat_id and
                                     self._token != "YOUR_BOT_TOKEN")
-        self._cooldown: int = tg.get("cooldown_seconds", 60)
+        self._cooldown: int = int(tg.get("cooldown_seconds", 60))
 
         self._queue: queue.Queue = queue.Queue(maxsize=100)
         self._sent_cache: dict[str, float] = {}   # fingerprint → sent_at timestamp
@@ -83,7 +137,7 @@ class TelegramNotifier:
         if not self._enabled:
             logger.warning(
                 "Telegram not configured — signals will be logged to console only. "
-                "Set telegram.bot_token and telegram.chat_id in config.yaml."
+                "Set telegram.bot_token and telegram.chat_id (user / group / channel -100…)."
             )
 
     def start(self) -> None:
@@ -161,7 +215,7 @@ class TelegramNotifier:
         payload = {
             "chat_id": self._chat_id,
             "text": text,
-            "parse_mode": "HTML",
+            "parse_mode": self._parse_mode,
             "disable_web_page_preview": True,
         }
 

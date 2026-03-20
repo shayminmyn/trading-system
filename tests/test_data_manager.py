@@ -17,6 +17,7 @@ SAMPLE_CONFIG = {
         "poll_interval_seconds": 0.05,
         "fallback_source": "mock",
         "historical_dir": "data/historical",
+        "mock_replay_from_historical": False,
     },
     "mt5": {},
 }
