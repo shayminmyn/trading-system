@@ -20,7 +20,7 @@ from pathlib import Path
 from src.utils import get_logger, ConfigLoader, print_runtime_info, get_optimal_workers
 from src.data import DataManager, HistoricalLoader
 from src.data.mock_source import generate_ohlcv
-from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy
+from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, HiddenDivergenceStrategy
 from src.backtest import BacktestEngine, ReportGenerator
 
 logger = get_logger("backtest", log_file="logs/trading.log")
@@ -29,6 +29,7 @@ _STRATEGY_REGISTRY = {
     # "MACDCrossover": MACDCrossoverStrategy,
     # "RSI_EMA": RSI_EMA_Strategy,
     "SonicR": SonicRStrategy,
+    "HiddenDivergence": HiddenDivergenceStrategy,
 }
 
 
@@ -66,6 +67,7 @@ def main() -> None:
     bt_cfg = cfg.get("backtest", {})
     rm_cfg = cfg.get("risk_management", {})
     strat_params = cfg.get("strategies", {})
+    session_filters = cfg.get("session_filters", {})
 
     engine = BacktestEngine(cfg.raw)
     reporter = ReportGenerator(bt_cfg.get("output_dir", "backtest_results"))
@@ -92,7 +94,8 @@ def main() -> None:
                 cls = _STRATEGY_REGISTRY.get(strat_name)
                 if cls is None:
                     continue
-                params = strat_params.get(strat_name, {})
+                params = dict(strat_params.get(strat_name, {}))
+                params["session_filters"] = session_filters
                 strategy = cls(symbol=symbol, timeframe=tf, parameters=params)
                 jobs.append({
                     "strategy": strategy,

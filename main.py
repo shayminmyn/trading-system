@@ -39,6 +39,7 @@ def build_strategies(config: dict) -> dict[tuple[str, str], list]:
     """Instantiate all configured strategies per (symbol, timeframe)."""
     strategies: dict[tuple[str, str], list] = {}
     strategy_params = config.get("strategies", {})
+    session_filters = config.get("session_filters", {})
 
     for pair in config.get("trading_pairs", []):
         symbol = pair["symbol"]
@@ -50,7 +51,8 @@ def build_strategies(config: dict) -> dict[tuple[str, str], list]:
                 if cls is None:
                     logger.warning("Unknown strategy: %s — skipping", strat_name)
                     continue
-                params = strategy_params.get(strat_name, {})
+                params = dict(strategy_params.get(strat_name, {}))
+                params["session_filters"] = session_filters
                 strategies[key].append(cls(symbol=symbol, timeframe=tf, parameters=params))
                 logger.info("Loaded strategy: %s for %s/%s", strat_name, symbol, tf)
     return strategies

@@ -8,13 +8,13 @@
 trading_pairs:
   - symbol: "XAUUSD"
     timeframes: ["H1", "H4"]
-    strategies: ["SonicR", "MACDCrossover"]
+    strategies: ["SonicR", "HiddenDivergence", "MACDCrossover"]
   - symbol: "EURUSD"
     timeframes: ["H1", "H4"]
-    strategies: ["SonicR"]
+    strategies: ["SonicR", "HiddenDivergence"]
   - symbol: "GBPUSD"
     timeframes: ["H1"]
-    strategies: ["SonicR", "RSI_EMA"]
+    strategies: ["SonicR", "HiddenDivergence", "RSI_EMA"]
 
 # ── Risk Management ───────────────────────────────────────────────────────────
 risk_management:
@@ -24,6 +24,21 @@ risk_management:
   max_concurrent_trades: 3      # Max open signals at once
   min_lot_size: 0.01
   max_lot_size: 10.0
+
+# ── Session & news blackout (không vào lệnh trong các khung giờ sau) ───────────
+# Áp dụng cho mọi strategy qua BaseStrategy (backtest + live).
+# Thời gian mặc định: UTC (khớp timestamp CSV).
+session_filters:
+  enabled: false                    # true = bật lọc
+  # Thứ Hai: không vào lệnh trong N giờ đầu (UTC), vd. 00:00–02:00
+  monday_avoid_first_hours: 2
+  # Thứ Sáu: không vào lệnh trong N giờ cuối trước khi đóng phiên tuần (FX thường 21:00 UTC)
+  friday_avoid_hours_before_week_close: 5
+  friday_week_close_hour_utc: 21
+  friday_week_close_minute_utc: 0
+  # Tin tức mạnh: tránh ± N giờ quanh mỗi mốc (file CSV, cột datetime_utc)
+  news_margin_hours: 1
+  news_events_file: "data/news_events.csv"   # copy từ news_events.example.csv và cập nhật lịch
 
 # ── MetaTrader5 ───────────────────────────────────────────────────────────────
 # MT5 only works on Windows. Leave blank when developing on macOS/Linux.
@@ -41,6 +56,32 @@ telegram:
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 strategies:
+  HiddenDivergence:
+    max_concurrent_trades: 1        # 1 = wait for current trade to close before new entry
+    rsi_period: 14                  # RSI lookback period
+    ema_fast: 34                    # EMA value zone (PAC midline)
+    ema_slow: 89                    # Trend anchor EMA
+    ema_trend: 200                  # Macro trend filter
+    atr_period: 14
+    swing_lookback: 60              # Bars scanned for swing-point detection
+    swing_strength: 3               # Bars each side required to confirm swing
+    min_swing_separation_bars: 10   # Min bars between đỉnh1–đỉnh2 / đáy1–đáy2 (0 = tắt)
+    sl_buffer_atr: 0.3              # ATR padding on SL (placed at High1/Low1)
+    min_rr: 1.5                     # Minimum estimated reward-to-risk ratio
+    # ── Limit-order entry (Phân kỳ ẩn + retest) ───────────────────────────────
+    limit_entry: true               # Place limit at swing level instead of market
+    limit_entry_mode: "swing"       # "swing"=at Low2/High2  "ema34"=at EMA34
+    limit_expiry_bars: 10           # Cancel if unfilled within N bars
+    # ── RSI-50 filters (Golden Combo) ─────────────────────────────────────────
+    rsi_buy_floor: 40.0             # RSI at Low2 must be above this (BUY filter)
+    rsi_sell_ceil: 60.0             # RSI at High2 must be below this (SELL filter)
+    # ── Entry candle (only applies when limit_entry=false) ────────────────────
+    require_strong_candle: false    # Candle confirmation not needed for limit mode
+    strong_candle_ratio: 0.4        # Min body/range ratio (0.4 = 40%)
+    # ── EMA Confluence (set true for max accuracy, fewer trades) ─────────────
+    require_ema_confluence: false   # 2nd swing must be near EMA34 or EMA89
+    ema_confluence_atr: 1.0         # ATR tolerance for confluence check
+
   MACDCrossover:
     fast_period: 12
     slow_period: 26
@@ -71,6 +112,9 @@ strategies:
     require_strong_candle: true     # Thân nến > strong_candle_ratio × range
     strong_candle_ratio: 0.5        # Tỷ lệ tối thiểu thân/range (0.5 = 50%)
     min_rr: 1.0                     # RR tối thiểu để chấp nhận lệnh
+    # ── Limit-order entry optimisation ──────────────────────────────────────────
+    limit_entry: true               # Chờ giá về EMA34 thay vì vào lệnh thị trường
+    limit_expiry_bars: 10           # Hủy lệnh nếu không fill trong N nến
     # Sideways Oscillation Signal
     enable_sw_signal: true          # Bật tín hiệu sw đi quanh EMA34
     sw_lookback: 30                 # Số nến tối thiểu để xác nhận sideway

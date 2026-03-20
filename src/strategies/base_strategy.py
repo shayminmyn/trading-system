@@ -38,13 +38,24 @@ class Signal:
     sl_pips: float                    # Stop-loss distance in pips
     timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     notes: str = ""
+    # Limit-order entry optimisation
+    # ─────────────────────────────────────────────────────────────────────────
+    # limit_price > 0  → place a pending limit order at this price level
+    #                    instead of entering at market on the next bar.
+    #                    The backtest engine waits for price to touch this
+    #                    level within limit_expiry_bars bars.
+    # limit_price == 0 → market order (default, existing behaviour).
+    limit_price: float = 0.0
+    limit_expiry_bars: int = 0        # 0 = use engine default
+    sl_level: float = 0.0             # absolute SL price (used for limit-fill recalc)
 
     def is_actionable(self) -> bool:
         return self.action in ("BUY", "SELL") and self.sl_pips > 0
 
     def __str__(self) -> str:
+        order = f" LIMIT@{self.limit_price:.5f}" if self.limit_price > 0 else " MARKET"
         return (
-            f"Signal({self.action} {self.symbol}/{self.timeframe} "
+            f"Signal({self.action}{order} {self.symbol}/{self.timeframe} "
             f"entry={self.entry:.5f} sl_pips={self.sl_pips:.1f} "
             f"strategy={self.strategy_name})"
         )
@@ -96,6 +107,9 @@ class BaseStrategy(ABC):
         self.update_data(df)
         try:
             enriched = self.calculate_indicators(self._data.copy())
+            ts = enriched.iloc[-1]["timestamp"]
+            if not self._session_allows_entry(ts):
+                return None
             signal = self.generate_signal(enriched)
         except Exception:
             logger.exception("%s failed on %s %s", self.name, symbol, timeframe)
@@ -133,12 +147,27 @@ class BaseStrategy(ABC):
             sl_pips=0.0,
         )
 
+    def _session_allows_entry(self, bar_timestamp) -> bool:
+        """
+        Global session/news blackout (see config session_filters).
+        When disabled or missing → allow entries.
+        """
+        sf = self.parameters.get("session_filters")
+        if not sf or not sf.get("enabled", False):
+            return True
+        from ..utils.session_news_filter import is_entry_allowed
+
+        return is_entry_allowed(bar_timestamp, sf)
+
     def _make_signal(
         self,
         action: SignalAction,
         entry: float,
         sl_pips: float,
         notes: str = "",
+        limit_price: float = 0.0,
+        limit_expiry_bars: int = 0,
+        sl_level: float = 0.0,
     ) -> Signal:
         return Signal(
             action=action,
@@ -148,4 +177,7 @@ class BaseStrategy(ABC):
             entry=entry,
             sl_pips=sl_pips,
             notes=notes,
+            limit_price=limit_price,
+            limit_expiry_bars=limit_expiry_bars,
+            sl_level=sl_level,
         )
