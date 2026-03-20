@@ -1,0 +1,16 @@
+config.yaml
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+logs/*.log
+data/historical/*.csv
+backtest_results/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/

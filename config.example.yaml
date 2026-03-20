@@ -1,0 +1,98 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Trading System — Configuration Example
+# Copy this file to config.yaml and fill in your credentials.
+# NEVER commit config.yaml with real credentials to version control.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Trading Pairs ─────────────────────────────────────────────────────────────
+trading_pairs:
+  - symbol: "XAUUSD"
+    timeframes: ["H1", "H4"]
+    strategies: ["SonicR", "MACDCrossover"]
+  - symbol: "EURUSD"
+    timeframes: ["H1", "H4"]
+    strategies: ["SonicR"]
+  - symbol: "GBPUSD"
+    timeframes: ["H1"]
+    strategies: ["SonicR", "RSI_EMA"]
+
+# ── Risk Management ───────────────────────────────────────────────────────────
+risk_management:
+  account_balance: 10000        # USD — update before each session
+  risk_per_trade_percent: 1.5   # % account risked per trade
+  default_rr_ratio: 2           # Reward:Risk ratio (TP = SL × rr_ratio)
+  max_concurrent_trades: 3      # Max open signals at once
+  min_lot_size: 0.01
+  max_lot_size: 10.0
+
+# ── MetaTrader5 ───────────────────────────────────────────────────────────────
+# MT5 only works on Windows. Leave blank when developing on macOS/Linux.
+mt5:
+  login: 12345678
+  password: "YOUR_MT5_PASSWORD"
+  server: "Exness-MT5Real"      # e.g. ICMarketsSC-Demo, Exness-MT5Real
+  timeout: 60000                # ms
+
+# ── Telegram ──────────────────────────────────────────────────────────────────
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"   # From @BotFather
+  chat_id: "YOUR_CHAT_ID"       # Your user/group chat ID
+  parse_mode: "HTML"
+
+# ── Strategies ────────────────────────────────────────────────────────────────
+strategies:
+  MACDCrossover:
+    fast_period: 12
+    slow_period: 26
+    signal_period: 9
+    min_histogram_threshold: 0.0  # Minimum MACD histogram value to confirm signal
+
+  RSI_EMA:
+    rsi_period: 14
+    ema_fast: 9
+    ema_slow: 21
+    rsi_overbought: 70
+    rsi_oversold: 30
+
+  SonicR:
+    ema_fast: 34                  # EMA cluster short-term (cụm nến ngắn hạn)
+    ema_slow: 89                  # EMA cluster long-term  (xác định xu hướng)
+    atr_period: 14
+    atr_mult_far: 2.0             # Hệ số ATR để xác định "far value zone"
+    sl_buffer_atr: 0.3            # Buffer ATR cộng thêm khi đặt SL
+    min_ema_separation_atr: 0.5   # Khoảng tối thiểu EMA34-EMA89 / ATR (lọc sideway)
+    slope_lookback: 5             # Số nến để đo slope của EMA
+    pullback_lookback: 30         # Cửa sổ tìm vùng pullback/correction
+    extension_lookback: 20        # Cửa sổ tìm extension trước pullback
+    min_rr: 1.0                   # RR tối thiểu (bỏ qua lệnh nếu RR < giá trị này)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data:
+  historical_dir: "data/historical"
+  # bars_to_load: How many past bars to load on startup for indicator warmup
+  warmup_bars: 200
+  # Data source when MT5 is unavailable: "csv" or "mock"
+  fallback_source: "mock"
+  # Polling interval in seconds when streaming via MT5 copy_rates
+  poll_interval_seconds: 1
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+backtest:
+  initial_cash: 10000
+  commission_percent: 0.0       # 0 for Forex (spread-based)
+  slippage_pips: 2              # Slippage simulation
+  output_dir: "backtest_results"
+
+# ── Concurrency ───────────────────────────────────────────────────────────────
+concurrency:
+  # Number of worker threads for parallel strategy evaluation.
+  # With Python 3.13t/3.14t (no-GIL), these run truly in parallel.
+  strategy_workers: 4
+  data_workers: 4
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"                 # DEBUG | INFO | WARNING | ERROR
+  log_file: "logs/trading.log"
+  max_bytes: 10485760           # 10 MB
+  backup_count: 5
