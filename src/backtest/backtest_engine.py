@@ -88,6 +88,11 @@ class BacktestResult:
                 f"  → {t['result']:4s} @{ex_str}  P&L={sign}${pnl:.2f}"
                 f"  bal=${bal:,.2f}\n"
             )
+            ntxt = (t.get("notes") or "").strip()
+            if ntxt:
+                cap = 800
+                show = ntxt if len(ntxt) <= cap else ntxt[: cap - 1] + "…"
+                preview_lines += f"     📝 {show}\n"
 
         expired_line = f"  Expired      : {len(expired)} limit orders (unfilled)\n" if expired else ""
 
@@ -235,6 +240,7 @@ class BacktestEngine:
                     "limit_price":       signal.limit_price,    # 0 = market order
                     "limit_expiry_bars": signal.limit_expiry_bars,
                     "timestamp":         df.iloc[i]["timestamp"],
+                    "notes":             (signal.notes or "").strip(),
                 })
 
         logger.debug("Generated %d raw signals", len(signals))
@@ -413,6 +419,7 @@ class BacktestEngine:
 
         for sig in signals:
             sig_bar  = sig["bar_index"]
+            sig_notes = str(sig.get("notes") or "").strip()
             if sig_bar in used_signal_bars:
                 continue
 
@@ -455,6 +462,7 @@ class BacktestEngine:
                         "exit_price":  0.0,
                         "pips":        0.0,
                         "exit_timestamp": self._timestamp_at_bar(df, exp_bar),
+                        "notes":       sig_notes,
                     })
                     # Expired limit still occupied its slot until expiry / weekend cancel
                     active_end_bars.append(exp_bar)
@@ -506,6 +514,7 @@ class BacktestEngine:
                     "exit_price":  outcome["exit_price"],
                     "pips":        outcome["pips"],
                     "exit_timestamp": self._timestamp_at_bar(df, outcome["exit_bar"]),
+                    "notes":       sig_notes,
                 })
                 active_end_bars.append(outcome["exit_bar"])
                 used_signal_bars.add(sig_bar)
@@ -547,6 +556,7 @@ class BacktestEngine:
                     "exit_price":  outcome["exit_price"],
                     "pips":        outcome["pips"],
                     "exit_timestamp": self._timestamp_at_bar(df, outcome["exit_bar"]),
+                    "notes":       sig_notes,
                 })
                 active_end_bars.append(outcome["exit_bar"])
                 used_signal_bars.add(sig_bar)

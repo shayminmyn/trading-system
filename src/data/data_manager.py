@@ -178,6 +178,22 @@ class DataManager:
         from .mock_source import MockDataStreamer
         return None  # Mock data is generated inline in _stream_loop
 
+    def _log_warmup_tail(self, symbol: str, timeframe: str, df: pd.DataFrame, n: int = 5) -> None:
+        """Log N nến cuối sau khi warmup — hiện thị OHLC để xác nhận dữ liệu đúng."""
+        if df.empty:
+            logger.info("Warmup tail %s %s: (empty)", symbol, timeframe)
+            return
+        tail = df.tail(n)
+        lines = [f"Warmup tail {symbol} {timeframe} — last {min(n, len(df))}/{len(df)} bars:"]
+        for _, row in tail.iterrows():
+            ts = row.get("timestamp", "?")
+            o = float(row.get("open", float("nan")))
+            h = float(row.get("high", float("nan")))
+            l = float(row.get("low", float("nan")))
+            c = float(row.get("close", float("nan")))
+            lines.append(f"  {ts}  O={o:.5g}  H={h:.5g}  L={l:.5g}  C={c:.5g}")
+        logger.info("\n".join(lines))
+
     def _init_data(self, symbol: str, timeframe: str) -> None:
         """Seed the rolling DataFrame with warmup bars."""
         key = (symbol, timeframe)
@@ -232,6 +248,8 @@ class DataManager:
             logger.info(
                 "Loaded %d warmup bars for %s %s", len(df), symbol, timeframe
             )
+            if self._connector and hasattr(self._connector, "get_ohlcv"):
+                self._log_warmup_tail(symbol, timeframe, df)
         except Exception as exc:
             logger.error("Failed to load warmup bars for %s %s: %s", symbol, timeframe, exc)
             with self._data_lock:
@@ -568,13 +586,18 @@ class DataManager:
         if count != 1 and (count - 1) % every != 0:
             return
         ts = bar.get("timestamp", "?")
+        o = float(bar.get("open", float("nan")))
+        h = float(bar.get("high", float("nan")))
+        l = float(bar.get("low", float("nan")))
+        c = float(bar.get("close", float("nan")))
         spill_info = f" spill+{len(to_spill)}" if to_spill is not None else ""
         logger.info(
-            "Buffer append #%d %s %s ts=%s ram=%d/%d%s",
+            "Bar #%d %s %s  ts=%s  O=%.5g H=%.5g L=%.5g C=%.5g  ram=%d/%d%s",
             count,
             key[0],
             key[1],
             ts,
+            o, h, l, c,
             buf_len,
             self._buffer_max_bars,
             spill_info,

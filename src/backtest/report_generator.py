@@ -9,6 +9,7 @@ Generates:
 
 from __future__ import annotations
 
+import html
 import json
 import os
 from datetime import datetime, timezone
@@ -187,6 +188,21 @@ class ReportGenerator:
                 "<span style='font-size:0.75em;color:#8ab4f8;margin-left:3px'>[L]</span>"
                 if otype == "LIMIT" else ""
             )
+            raw_notes = (t.get("notes") or "").strip()
+            if raw_notes:
+                n_esc = html.escape(raw_notes)
+                n_show = n_esc[:800] + ("…" if len(raw_notes) > 800 else "")
+                title_safe = html.escape(
+                    raw_notes.replace("\n", " ").replace("\r", " ")[:1200],
+                    quote=True,
+                )
+                notes_cell = (
+                    f"<td style='max-width:280px;font-size:0.78em;color:#9fb8d0;"
+                    f"white-space:pre-wrap;word-break:break-word' title=\"{title_safe}\">"
+                    f"{n_show}</td>"
+                )
+            else:
+                notes_cell = "<td style='color:#555'>—</td>"
             return (
                 f"<tr{row_style}>"
                 f"<td>{fmt_ts(t['timestamp'])}</td>"
@@ -199,6 +215,7 @@ class ReportGenerator:
                 f"<td style='color:#a8c7ff;font-size:0.92em'>{exit_str}</td>"
                 f"<td style='color:{pnl_color}'><b>{pnl_str}</b></td>"
                 f"<td style='color:#cccccc'>{bal_str}</td>"
+                f"{notes_cell}"
                 f"</tr>"
             )
 
@@ -268,6 +285,7 @@ class ReportGenerator:
   <span style="color:#8ab4f8">[L]</span> = Limit order entry &nbsp;|&nbsp;
   P&amp;L and Balance in USD &nbsp;|&nbsp;
   <b>Exit</b> = thời điểm nến chạm TP/SL (hoặc hết hạn lệnh) &nbsp;|&nbsp;
+  <b>Notes</b> = cùng nội dung <code>signal.notes</code> như Telegram &nbsp;|&nbsp;
   Data source: UTC+0 → displayed as UTC+7
 </p>
 {expired_note}
@@ -276,6 +294,7 @@ class ReportGenerator:
   <th>Entry time (UTC+7)</th><th>Dir</th><th>Entry</th>
   <th>SL</th><th>TP</th><th>Vol(lot)</th>
   <th>Result</th><th>Exit TP/SL (UTC+7)</th><th>P&amp;L (USD)</th><th>Balance</th>
+  <th>Notes (strategy)</th>
 </tr>
 {rows}
 </table>

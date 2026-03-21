@@ -274,7 +274,7 @@ class TestBufferSpillToDisk:
             for i in range(11):
                 dm._append_bar("XAUUSD", "H1", self._make_row(i))
 
-        bar_msgs = [m for m in log_calls if "Buffer append" in m]
+        bar_msgs = [m for m in log_calls if "Bar #" in m]
         counts = [int(m.split("#")[1].split()[0]) for m in bar_msgs]
         # Nến đầu tiên (#1) luôn log; sau đó #6, #11 (every_n=5)
         assert 1 in counts
