@@ -78,6 +78,9 @@ class DataManager:
         spill_dir = data_cfg.get("buffer_spill_dir", "data/live_buffer")
         self._buffer_spill_dir: Path = Path(str(spill_dir))
         self._spill_write_lock = threading.Lock()
+        # Đếm nến *mới* append vào buffer khi đang stream (không tính warmup). Log INFO mỗi N nến; 0 = tắt.
+        self._ram_new_bar_log_every_n: int = max(0, int(data_cfg.get("ram_new_bar_log_every_n", 20)))
+        self._ram_bar_count: dict[tuple[str, str], int] = {}
 
         # DataFrame store: key = (symbol, timeframe)
         self._data: dict[tuple[str, str], pd.DataFrame] = {}
@@ -94,6 +97,32 @@ class DataManager:
         self._replay_remaining: dict[tuple[str, str], pd.DataFrame] = {}
         # MT5: timestamp của nến đã đóng mới nhất đã xử lý (tránh gọi strategy trùng).
         self._mt5_last_closed_ts: dict[tuple[str, str], pd.Timestamp | None] = {}
+
+    def _bump_ram_bar_count_locked(self, key: tuple[str, str]) -> int:
+        """Tăng số nến mới vào RAM (gọi trong ``_data_lock``)."""
+        c = self._ram_bar_count.get(key, 0) + 1
+        self._ram_bar_count[key] = c
+        return c
+
+    def _log_ram_bar_milestone(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+        ts,
+    ) -> None:
+        """Ghi log mỗi N nến mới (bắt đầu đếm từ nến stream đầu tiên): N, 2N, …"""
+        n = self._ram_new_bar_log_every_n
+        if n <= 0 or count % n != 0:
+            return
+        logger.info(
+            "buffer %s %s: nến mới trong RAM #%d (log mỗi %d nến) — ts=%s",
+            symbol,
+            timeframe,
+            count,
+            n,
+            ts,
+        )
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -371,27 +400,37 @@ class DataManager:
     def _mt5_merge_closed_bar(self, key: tuple[str, str], completed: pd.Series) -> None:
         """Gộp nến đóng vào buffer: cùng timestamp → thay hàng cuối (chốt OHLC); mới hơn → append."""
         ct = pd.Timestamp(completed["timestamp"])
+        sym, tf = key
+        ram_count_for_log: int | None = None
         with self._data_lock:
             df = self._data.get(key, pd.DataFrame())
             if df.empty:
-                self._data[key] = pd.DataFrame([completed])
-                return
-            last_ts = pd.Timestamp(df.iloc[-1]["timestamp"])
-            if last_ts == ct:
-                df = pd.concat(
-                    [df.iloc[:-1], pd.DataFrame([completed])], ignore_index=True
-                )
-            elif last_ts < ct:
-                df = pd.concat([df, pd.DataFrame([completed])], ignore_index=True)
+                df = pd.DataFrame([completed])
+                df = self._trim_buffer_spill(key, df)
+                self._data[key] = df
+                ram_count_for_log = self._bump_ram_bar_count_locked(key)
             else:
-                logger.warning(
-                    "MT5 merge: bỏ qua — completed ts %s <= last row %s",
-                    ct,
-                    last_ts,
-                )
-                return
-            df = self._trim_buffer_spill(key, df)
-            self._data[key] = df
+                last_ts = pd.Timestamp(df.iloc[-1]["timestamp"])
+                if last_ts == ct:
+                    df = pd.concat(
+                        [df.iloc[:-1], pd.DataFrame([completed])], ignore_index=True
+                    )
+                    df = self._trim_buffer_spill(key, df)
+                    self._data[key] = df
+                elif last_ts < ct:
+                    df = pd.concat([df, pd.DataFrame([completed])], ignore_index=True)
+                    df = self._trim_buffer_spill(key, df)
+                    self._data[key] = df
+                    ram_count_for_log = self._bump_ram_bar_count_locked(key)
+                else:
+                    logger.warning(
+                        "MT5 merge: bỏ qua — completed ts %s <= last row %s",
+                        ct,
+                        last_ts,
+                    )
+                    return
+        if ram_count_for_log is not None:
+            self._log_ram_bar_milestone(sym, tf, ram_count_for_log, completed["timestamp"])
 
     def _trim_buffer_spill(self, key: tuple[str, str], df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -548,6 +587,8 @@ class DataManager:
             df = pd.concat([df, new_row], ignore_index=True)
             df = self._trim_buffer_spill(key, df)
             self._data[key] = df
+            c = self._bump_ram_bar_count_locked(key)
+        self._log_ram_bar_milestone(symbol, timeframe, c, bar["timestamp"])
 
     def _fire_callbacks(
         self, symbol: str, timeframe: str, df: pd.DataFrame
