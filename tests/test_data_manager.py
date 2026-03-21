@@ -201,33 +201,85 @@ class TestMT5MergeClosedBar:
 
 
 class TestBufferSpillToDisk:
-    def test_spill_old_rows_to_csv(self, tmp_path):
-        cfg = {
+    def _make_cfg(self, tmp_path, max_bars=3, spill_enabled=True, bar_log_every=20):
+        return {
             **SAMPLE_CONFIG,
             "data": {
                 **SAMPLE_CONFIG["data"],
-                "buffer_max_bars": 3,
-                "buffer_spill_enabled": True,
+                "buffer_max_bars": max_bars,
+                "buffer_spill_enabled": spill_enabled,
                 "buffer_spill_dir": str(tmp_path),
+                "bar_log_every_n": bar_log_every,
             },
         }
-        dm = DataManager(cfg)
+
+    def _make_row(self, i: int) -> pd.Series:
+        ts = pd.Timestamp(f"2024-01-{10 + i:02d} 10:00:00", tz="UTC")
+        return pd.Series(
+            {
+                "timestamp": ts,
+                "open": float(i),
+                "high": float(i) + 1,
+                "low": float(i) - 0.5,
+                "close": float(i) + 0.5,
+                "volume": 100 + i,
+            }
+        )
+
+    def test_spill_old_rows_to_csv(self, tmp_path):
+        dm = DataManager(self._make_cfg(tmp_path))
         for i in range(5):
-            ts = pd.Timestamp(f"2024-01-{10 + i:02d} 10:00:00", tz="UTC")
-            row = pd.Series(
-                {
-                    "timestamp": ts,
-                    "open": float(i),
-                    "high": float(i) + 1,
-                    "low": float(i) - 0.5,
-                    "close": float(i) + 0.5,
-                    "volume": 100 + i,
-                }
-            )
-            dm._append_bar("XAUUSD", "H1", row)
+            dm._append_bar("XAUUSD", "H1", self._make_row(i))
         out = dm.get_data("XAUUSD", "H1")
         assert len(out) == 3
         spill = tmp_path / "XAUUSD_H1_buffer.csv"
         assert spill.exists()
         dumped = pd.read_csv(spill)
         assert len(dumped) == 2
+
+    def test_spill_no_file_when_disabled(self, tmp_path):
+        dm = DataManager(self._make_cfg(tmp_path, spill_enabled=False))
+        for i in range(5):
+            dm._append_bar("XAUUSD", "H1", self._make_row(i))
+        out = dm.get_data("XAUUSD", "H1")
+        assert len(out) == 3
+        spill = tmp_path / "XAUUSD_H1_buffer.csv"
+        assert not spill.exists()
+
+    def test_spill_no_duplicate_header(self, tmp_path):
+        """Ghi nhiều đợt — file CSV chỉ có 1 dòng header."""
+        dm = DataManager(self._make_cfg(tmp_path, max_bars=2))
+        for i in range(8):
+            dm._append_bar("XAUUSD", "H1", self._make_row(i))
+        spill = tmp_path / "XAUUSD_H1_buffer.csv"
+        assert spill.exists()
+        with open(spill) as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+        header_lines = [l for l in lines if "timestamp" in l.lower()]
+        assert len(header_lines) == 1, "CSV chỉ được có 1 dòng header"
+
+    def test_bar_log_first_and_every_n(self, tmp_path):
+        """Log INFO tại nến #1 và mỗi 5 nến tiếp theo (every_n=5)."""
+        from unittest.mock import patch
+        dm = DataManager(self._make_cfg(tmp_path, max_bars=100, bar_log_every=5))
+        log_calls: list[tuple] = []
+        original_info = dm.__class__.__module__  # just to reference the module
+
+        with patch("src.data.data_manager.logger") as mock_log:
+            mock_log.info.side_effect = lambda msg, *a, **kw: log_calls.append(
+                (msg % a) if a else msg
+            )
+            mock_log.debug.return_value = None
+            mock_log.warning.return_value = None
+            for i in range(11):
+                dm._append_bar("XAUUSD", "H1", self._make_row(i))
+
+        bar_msgs = [m for m in log_calls if "Buffer append" in m]
+        counts = [int(m.split("#")[1].split()[0]) for m in bar_msgs]
+        # Nến đầu tiên (#1) luôn log; sau đó #6, #11 (every_n=5)
+        assert 1 in counts
+        assert 6 in counts
+        assert 11 in counts
+        # #2–#5, #7–#10 KHÔNG log
+        assert 2 not in counts
+        assert 5 not in counts

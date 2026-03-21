@@ -78,9 +78,9 @@ class DataManager:
         spill_dir = data_cfg.get("buffer_spill_dir", "data/live_buffer")
         self._buffer_spill_dir: Path = Path(str(spill_dir))
         self._spill_write_lock = threading.Lock()
-        # Đếm nến *mới* append vào buffer khi đang stream (không tính warmup). Log INFO mỗi N nến; 0 = tắt.
-        self._ram_new_bar_log_every_n: int = max(0, int(data_cfg.get("ram_new_bar_log_every_n", 20)))
-        self._ram_bar_count: dict[tuple[str, str], int] = {}
+        # Đếm số nến đã append vào RAM per (symbol, timeframe) — dùng để log mỗi 20 nến.
+        self._buffer_bar_count: dict[tuple[str, str], int] = defaultdict(int)
+        self._bar_log_every: int = max(1, int(data_cfg.get("bar_log_every_n", 20)))
 
         # DataFrame store: key = (symbol, timeframe)
         self._data: dict[tuple[str, str], pd.DataFrame] = {}
@@ -97,32 +97,6 @@ class DataManager:
         self._replay_remaining: dict[tuple[str, str], pd.DataFrame] = {}
         # MT5: timestamp của nến đã đóng mới nhất đã xử lý (tránh gọi strategy trùng).
         self._mt5_last_closed_ts: dict[tuple[str, str], pd.Timestamp | None] = {}
-
-    def _bump_ram_bar_count_locked(self, key: tuple[str, str]) -> int:
-        """Tăng số nến mới vào RAM (gọi trong ``_data_lock``)."""
-        c = self._ram_bar_count.get(key, 0) + 1
-        self._ram_bar_count[key] = c
-        return c
-
-    def _log_ram_bar_milestone(
-        self,
-        symbol: str,
-        timeframe: str,
-        count: int,
-        ts,
-    ) -> None:
-        """Ghi log mỗi N nến mới (bắt đầu đếm từ nến stream đầu tiên): N, 2N, …"""
-        n = self._ram_new_bar_log_every_n
-        if n <= 0 or count % n != 0:
-            return
-        logger.info(
-            "buffer %s %s: nến mới trong RAM #%d (log mỗi %d nến) — ts=%s",
-            symbol,
-            timeframe,
-            count,
-            n,
-            ts,
-        )
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -400,28 +374,26 @@ class DataManager:
     def _mt5_merge_closed_bar(self, key: tuple[str, str], completed: pd.Series) -> None:
         """Gộp nến đóng vào buffer: cùng timestamp → thay hàng cuối (chốt OHLC); mới hơn → append."""
         ct = pd.Timestamp(completed["timestamp"])
-        sym, tf = key
-        ram_count_for_log: int | None = None
+        to_spill: pd.DataFrame | None = None
+        new_count: int = 0
+        buf_len: int = 0
         with self._data_lock:
             df = self._data.get(key, pd.DataFrame())
             if df.empty:
-                df = pd.DataFrame([completed])
-                df = self._trim_buffer_spill(key, df)
-                self._data[key] = df
-                ram_count_for_log = self._bump_ram_bar_count_locked(key)
+                self._data[key] = pd.DataFrame([completed])
+                self._buffer_bar_count[key] += 1
+                new_count = self._buffer_bar_count[key]
+                buf_len = 1
             else:
                 last_ts = pd.Timestamp(df.iloc[-1]["timestamp"])
                 if last_ts == ct:
                     df = pd.concat(
                         [df.iloc[:-1], pd.DataFrame([completed])], ignore_index=True
                     )
-                    df = self._trim_buffer_spill(key, df)
-                    self._data[key] = df
                 elif last_ts < ct:
                     df = pd.concat([df, pd.DataFrame([completed])], ignore_index=True)
-                    df = self._trim_buffer_spill(key, df)
-                    self._data[key] = df
-                    ram_count_for_log = self._bump_ram_bar_count_locked(key)
+                    self._buffer_bar_count[key] += 1
+                    new_count = self._buffer_bar_count[key]
                 else:
                     logger.warning(
                         "MT5 merge: bỏ qua — completed ts %s <= last row %s",
@@ -429,30 +401,30 @@ class DataManager:
                         last_ts,
                     )
                     return
-        if ram_count_for_log is not None:
-            self._log_ram_bar_milestone(sym, tf, ram_count_for_log, completed["timestamp"])
+                df, to_spill = self._trim_buffer_spill(key, df)
+                self._data[key] = df
+                buf_len = len(df)
 
-    def _trim_buffer_spill(self, key: tuple[str, str], df: pd.DataFrame) -> pd.DataFrame:
+        if new_count:
+            self._maybe_log_bar_appended(key, new_count, completed, buf_len, to_spill)
+        if to_spill is not None:
+            self._append_buffer_to_spill_file(key, to_spill)
+
+    def _trim_buffer_spill(
+        self, key: tuple[str, str], df: pd.DataFrame
+    ) -> tuple[pd.DataFrame, "pd.DataFrame | None"]:
         """
         Giữ tối đa ``_buffer_max_bars`` hàng trong RAM.
-        Nếu vượt: ghi các hàng cũ nhất ra CSV (append) rồi cắt — tránh mất dữ liệu và OOM khi chạy lâu.
+        Trả về ``(trimmed_df, rows_to_spill)`` — gọi trong _data_lock;
+        caller phải ghi spill ra đĩa *ngoài* lock để không chặn reader.
         """
         max_b = self._buffer_max_bars
         if len(df) <= max_b:
-            return df
+            return df, None
         n_drop = len(df) - max_b
         head = df.iloc[:n_drop].copy()
         rest = df.iloc[n_drop:].reset_index(drop=True)
-        if self._buffer_spill_enabled and not head.empty:
-            self._append_buffer_to_spill_file(key, head)
-        else:
-            logger.debug(
-                "Buffer trim %s %s: drop %d oldest rows (spill disabled)",
-                key[0],
-                key[1],
-                n_drop,
-            )
-        return rest
+        return rest, (head if self._buffer_spill_enabled else None)
 
     def _spill_csv_path(self, key: tuple[str, str]) -> Path:
         sym = re.sub(r"[^\w.\-]+", "_", str(key[0]))
@@ -462,27 +434,31 @@ class DataManager:
     def _append_buffer_to_spill_file(
         self, key: tuple[str, str], rows: pd.DataFrame
     ) -> None:
-        """Append OHLCV rows to per-(symbol,timeframe) CSV under buffer_spill_dir."""
+        """
+        Append OHLCV rows ra file CSV.
+        Gọi *ngoài* _data_lock để tránh chặn reader khi I/O chậm.
+        write_header được kiểm tra bên trong _spill_write_lock — tránh race.
+        """
         path = self._spill_csv_path(key)
         try:
             self._buffer_spill_dir.mkdir(parents=True, exist_ok=True)
-            write_header = not path.exists()
             with self._spill_write_lock:
-                rows.to_csv(
-                    path,
-                    mode="a",
-                    header=write_header,
-                    index=False,
-                )
+                write_header = not path.exists()
+                rows.to_csv(path, mode="a", header=write_header, index=False)
             logger.debug(
-                "Buffer spill: +%d rows → %s (RAM cap=%d)",
+                "Buffer spill %s %s: +%d rows → %s (RAM cap=%d)",
+                key[0],
+                key[1],
                 len(rows),
                 path,
                 self._buffer_max_bars,
             )
         except OSError as exc:
-            logger.error("Buffer spill failed (%s): %s — keeping data in memory only", path, exc)
-            # Không raise: tránh dừng stream; RAM có thể tăng nếu spill lỗi lặp lại
+            logger.error(
+                "Buffer spill failed (%s): %s — data kept in memory only",
+                path,
+                exc,
+            )
 
     def _stream_loop_mt5(
         self,
@@ -579,16 +555,46 @@ class DataManager:
         )
         return df.iloc[0]
 
+    def _maybe_log_bar_appended(
+        self,
+        key: tuple[str, str],
+        count: int,
+        bar: pd.Series,
+        buf_len: int,
+        to_spill: "pd.DataFrame | None",
+    ) -> None:
+        """Log INFO mỗi bar_log_every_n nến mới, bắt đầu từ nến đầu tiên (count=1)."""
+        every = self._bar_log_every
+        if count != 1 and (count - 1) % every != 0:
+            return
+        ts = bar.get("timestamp", "?")
+        spill_info = f" spill+{len(to_spill)}" if to_spill is not None else ""
+        logger.info(
+            "Buffer append #%d %s %s ts=%s ram=%d/%d%s",
+            count,
+            key[0],
+            key[1],
+            ts,
+            buf_len,
+            self._buffer_max_bars,
+            spill_info,
+        )
+
     def _append_bar(self, symbol: str, timeframe: str, bar: pd.Series) -> None:
         key = (symbol, timeframe)
+        to_spill: pd.DataFrame | None = None
+        new_count: int = 0
         with self._data_lock:
             df = self._data.get(key, pd.DataFrame())
-            new_row = pd.DataFrame([bar])
-            df = pd.concat([df, new_row], ignore_index=True)
-            df = self._trim_buffer_spill(key, df)
+            df = pd.concat([df, pd.DataFrame([bar])], ignore_index=True)
+            df, to_spill = self._trim_buffer_spill(key, df)
             self._data[key] = df
-            c = self._bump_ram_bar_count_locked(key)
-        self._log_ram_bar_milestone(symbol, timeframe, c, bar["timestamp"])
+            self._buffer_bar_count[key] += 1
+            new_count = self._buffer_bar_count[key]
+
+        self._maybe_log_bar_appended(key, new_count, bar, len(df), to_spill)
+        if to_spill is not None:
+            self._append_buffer_to_spill_file(key, to_spill)
 
     def _fire_callbacks(
         self, symbol: str, timeframe: str, df: pd.DataFrame
