@@ -48,6 +48,13 @@ class Signal:
     limit_price: float = 0.0
     limit_expiry_bars: int = 0        # 0 = use engine default
     sl_level: float = 0.0             # absolute SL price (used for limit-fill recalc)
+    # Trailing break-even: move SL to entry when unrealised profit reaches this multiple of SL.
+    # 1.0 = move to BE at +1R. 0.0 = disabled (default).
+    breakeven_at_r: float = 0.0
+    # Partial close: khi lời ≥ partial_close_at_r × SL, đóng partial_close_ratio phần, dời SL thêm partial_trail_pips
+    partial_close_at_r: float = 0.0
+    partial_close_ratio: float = 0.5
+    partial_trail_pips: float = 5.0
 
     def is_actionable(self) -> bool:
         return self.action in ("BUY", "SELL") and self.sl_pips > 0
@@ -168,6 +175,10 @@ class BaseStrategy(ABC):
         limit_price: float = 0.0,
         limit_expiry_bars: int = 0,
         sl_level: float = 0.0,
+        breakeven_at_r: float = 0.0,
+        partial_close_at_r: float = 0.0,
+        partial_close_ratio: float = 0.5,
+        partial_trail_pips: float = 5.0,
     ) -> Signal:
         return Signal(
             action=action,
@@ -180,4 +191,8 @@ class BaseStrategy(ABC):
             limit_price=limit_price,
             limit_expiry_bars=limit_expiry_bars,
             sl_level=sl_level,
+            breakeven_at_r=breakeven_at_r,
+            partial_close_at_r=partial_close_at_r,
+            partial_close_ratio=partial_close_ratio,
+            partial_trail_pips=partial_trail_pips,
         )

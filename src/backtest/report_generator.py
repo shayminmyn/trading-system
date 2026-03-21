@@ -166,6 +166,8 @@ class ReportGenerator:
             is_expired = result == "EXPIRED"
             res_color  = (
                 "#00d4aa" if result == "TP" else
+                "#66cc88" if result == "PARTIAL" else  # PARTIAL = partial close (light green)
+                "#ffb347" if result == "BE" else        # BE = break-even (orange)
                 "#ff4b4b" if result == "SL" else
                 "#555555" if is_expired else "#aaaaaa"
             )
@@ -279,8 +281,10 @@ class ReportGenerator:
 
 <h3>Trade Log <span style="font-size:0.75em; color:#888; font-weight:normal">🕐 UTC+7 (Giờ Việt Nam)</span></h3>
 <p class="legend">
-  <span style="color:#ff8c00">■</span> SL &nbsp;|&nbsp;
+  <span style="color:#ff4b4b">■</span> SL &nbsp;|&nbsp;
   <span style="color:#00d4aa">■</span> TP &nbsp;|&nbsp;
+  <span style="color:#66cc88">■</span> PARTIAL = chốt lời từng phần (SL dời về gần BE) &nbsp;|&nbsp;
+  <span style="color:#ffb347">■</span> BE = break-even (SL dời về entry) &nbsp;|&nbsp;
   <span style="color:#8ab4f8">■</span> Volume (lot) &nbsp;|&nbsp;
   <span style="color:#8ab4f8">[L]</span> = Limit order entry &nbsp;|&nbsp;
   P&amp;L and Balance in USD &nbsp;|&nbsp;

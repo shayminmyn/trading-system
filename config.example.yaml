@@ -140,6 +140,63 @@ strategies:
     sw_lookback: 30                 # Số nến tối thiểu để xác nhận sideway
     sw_min_crosses: 3               # Số lần giá cắt qua EMA34 tối thiểu
     sw_max_range_atr: 4.0           # Range tối đa tính theo ATR
+    # ── Bộ lọc tối ưu v2 ────────────────────────────────────────────────────────
+    # (1) Breakout: bỏ qua nếu giá cách EMA200 quá xa (pips cố định, 0 = tắt)
+    breakout_max_ema200_dist_pips: 0
+    # (2) Rejection: SL đệm thêm để tránh bị quét bởi nhiễu (tính theo ATR, thêm vào sl_buffer_atr)
+    rejection_extra_sl_atr: 0.0
+    # (3) Max SL cứng: bỏ lệnh có SL rộng hơn ngưỡng này pips (0 = tắt)
+    max_sl_pips: 0
+    # (4) Trailing Break-even: dời SL về hoà vốn khi lãi ≥ N lần SL (0 = tắt; 1.0 = +1R)
+    breakeven_at_r: 0.0
+    # (5) Ưu tiên Rejection (SL ngắn hơn, RR tốt hơn): true = Rejection TRƯỚC Breakout
+    rejection_priority: false
+
+  # SonicRFund = SonicR + bộ lọc v3 đầy đủ (PAC Fanning, Partial Close, Candle Confirm, ATR-EMA200)
+  SonicRFund:
+    ema_fast: 34
+    ema_slow: 89
+    ema_trend: 200
+    atr_period: 14
+    atr_mult_far: 2.0
+    sl_buffer_atr: 0.3
+    min_ema_separation_atr: 0.5
+    slope_lookback: 5
+    pullback_lookback: 30
+    extension_lookback: 20
+    enable_pac_signals: true
+    vol_ma_len: 60
+    avg_body_len: 20
+    vol_ratio_breakout: 0.9
+    vol_ratio_rejection: 0.8
+    strong_body_ratio_avg: 0.8
+    ema89_touch_atr: 0.5
+    require_ema89_touch: true
+    require_ema89_rejection: true
+    require_strong_candle: true
+    strong_candle_ratio: 0.5
+    enable_sw_signal: true
+    sw_lookback: 30
+    sw_min_crosses: 3
+    sw_max_range_atr: 4.0
+    min_rr: 1.0
+    limit_entry: true
+    limit_expiry_bars: 10
+    # v2 filters
+    breakout_max_ema200_dist_atr: 3.0   # N×ATR, >0 overrides pips
+    breakout_max_ema200_dist_pips: 400  # fallback
+    rejection_extra_sl_atr: 0.0
+    max_sl_pips: 0
+    breakeven_at_r: 0.0                 # off — dùng partial close
+    rejection_priority: false
+    # v3 filters
+    require_pac_fanning: false          # true = bật slope filter
+    pac_fan_lookback: 5
+    breakout_min_close_body_pct: 0.0    # 0.3 = 30% thân nến ngoài PAC
+    breakout_max_counter_wick: 0.0      # 0.4 = 40% full-range
+    partial_close_at_r: 0.0            # 1.0 = chốt 50% tại +1R
+    partial_close_ratio: 0.5
+    partial_trail_pips: 5.0
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:

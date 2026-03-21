@@ -1,5 +1,9 @@
 """
-SonicR PRO Strategy — PAC Dragon Channel + Value Zone (v2).
+SonicRFund Strategy — PAC Dragon Channel + Value Zone (v3 Fund Edition).
+
+Inherits all logic from SonicR PRO (v3) with the full optimisation stack
+(PAC Fanning, Partial Close, Confirmation Candle, ATR-adaptive EMA200 dist).
+Config key: strategies.SonicRFund
 
 Ported from: SonicR PRO Signals Update version III.mq5
              by Dao Viet & Gemini AI
@@ -34,7 +38,7 @@ Indicators
   vol_ma           : SMA(vol_ma_len=60) of volume
   avg_body         : SMA(avg_body_len=20) of |close−open|
 
-Parameters (config.yaml → strategies.SonicR)
+Parameters (config.yaml → strategies.SonicRFund)
 --------------------------------------------
   ema_fast               : int   34     PAC channel / EMA short
   ema_slow               : int   89     Trend anchor EMA
@@ -69,6 +73,22 @@ Parameters (config.yaml → strategies.SonicR)
   ─── Trailing Break-even ──────────────────────────────────────────────
   breakeven_at_r         : float 0.0    Move SL to entry when profit ≥ N×SL (0=off)
 
+  ─── Partial close (chốt lời từng phần) ─────────────────────────────
+  partial_close_at_r     : float 0.0    Chốt ratio% khi lãi ≥ N×SL (0=off)
+  partial_close_ratio    : float 0.5    Tỷ lệ đóng lần đầu (0.5 = 50%)
+  partial_trail_pips     : float 5.0    Dời SL thêm N pips sau khi chốt
+
+  ─── PAC Slope (Fanning) filter ──────────────────────────────────────
+  require_pac_fanning    : bool  False  Chỉ vào lệnh khi EMA34–89 đang giãn rộng
+  pac_fan_lookback       : int   5      So sánh spread hiện tại vs N bar trước
+
+  ─── Breakout confirmation candle ────────────────────────────────────
+  breakout_min_close_body_pct : float 0.0   Close ≥ N% body nằm ngoài PAC (0=off)
+  breakout_max_counter_wick   : float 0.0   Counter-wick ≤ N×full-range (0=off)
+
+  ─── Dynamic EMA200 distance (ATR-adaptive) ──────────────────────────
+  breakout_max_ema200_dist_atr: float 0.0   Max dist ATR × N (>0 overrides pips, 0=use pips)
+
   ─── Sideways Oscillation signal ──────────────────────────────────────
   enable_sw_signal       : bool  True
   sw_lookback            : int   30     Min bars to confirm sideway
@@ -87,13 +107,13 @@ from ta.volatility import AverageTrueRange
 from .base_strategy import BaseStrategy, Signal
 from ..utils.logger import get_logger
 
-logger = get_logger("sonicr")
+logger = get_logger("sonicr_fund")
 
 
-class SonicRStrategy(BaseStrategy):
+class SonicRFundStrategy(BaseStrategy):
     """
-    SonicR PRO v2 — PAC Dragon Channel + Value Zone strategy.
-    Mirrors SonicR PRO Signals Update version III.mq5 logic.
+    SonicRFund — PAC Dragon Channel + Value Zone (v3, full optimisation stack).
+    Identical logic to SonicR PRO v3 with all v3 filters active by default.
     """
 
     def __init__(
@@ -144,6 +164,23 @@ class SonicRStrategy(BaseStrategy):
 
         # ── Trailing Break-even ───────────────────────────────────────────────
         self._breakeven_at_r: float    = float(p.get("breakeven_at_r", 0.0))
+
+        # ── Partial close ─────────────────────────────────────────────────────
+        self._partial_close_at_r: float  = float(p.get("partial_close_at_r", 0.0))
+        self._partial_close_ratio: float = float(p.get("partial_close_ratio", 0.5))
+        self._partial_trail_pips: float  = float(p.get("partial_trail_pips", 5.0))
+
+        # ── PAC Slope (Fanning) filter ────────────────────────────────────────
+        self._require_pac_fanning: bool = bool(p.get("require_pac_fanning", False))
+        self._pac_fan_lookback: int     = max(2, int(p.get("pac_fan_lookback", 5)))
+
+        # ── Breakout confirmation candle ──────────────────────────────────────
+        self._bo_min_close_body_pct: float  = float(p.get("breakout_min_close_body_pct", 0.0))
+        self._bo_max_counter_wick: float    = float(p.get("breakout_max_counter_wick", 0.0))
+
+        # ── Dynamic EMA200 distance filter (ATR-based) ────────────────────────
+        # Overrides breakout_max_ema200_dist_pips when > 0
+        self._bo_max_ema200_dist_atr: float = float(p.get("breakout_max_ema200_dist_atr", 0.0))
 
         # ── Sideways oscillation ──────────────────────────────────────────────
         self._enable_sw: bool          = bool(p.get("enable_sw_signal", True))
@@ -223,17 +260,17 @@ class SonicRStrategy(BaseStrategy):
         if self._enable_pac:
             if self._rejection_priority:
                 # Ưu tiên Rejection: SL ngắn hơn, RR tốt hơn
-                sig = self._check_pac_rejection(curr, prev)
+                sig = self._check_pac_rejection(curr, prev, df)
                 if sig is not None:
                     return sig
-                sig = self._check_pac_breakout(curr, prev)
+                sig = self._check_pac_breakout(curr, prev, df)
                 if sig is not None:
                     return sig
             else:
-                sig = self._check_pac_breakout(curr, prev)
+                sig = self._check_pac_breakout(curr, prev, df)
                 if sig is not None:
                     return sig
-                sig = self._check_pac_rejection(curr, prev)
+                sig = self._check_pac_rejection(curr, prev, df)
                 if sig is not None:
                     return sig
 
@@ -255,7 +292,7 @@ class SonicRStrategy(BaseStrategy):
     # ── Layer 1: PAC Breakout ─────────────────────────────────────────────────
 
     def _check_pac_breakout(
-        self, curr: pd.Series, prev: pd.Series
+        self, curr: pd.Series, prev: pd.Series, df: pd.DataFrame | None = None
     ) -> Signal | None:
         """
         MQ5 buyCond / sellCond:
@@ -276,17 +313,22 @@ class SonicRStrategy(BaseStrategy):
         if not self._is_strong_body_avg(curr):
             return None
 
+        # Slope filter: PAC phải đang giãn rộng (fanning out)
+        if df is not None and not self._is_pac_fanning(df, curr):
+            logger.debug("SonicRFund Breakout skipped: PAC not fanning out")
+            return None
+
         # ── BUY breakout ──────────────────────────────────────────────────────
         if prev["close"] <= prev["pac_high"] and curr["close"] > pac_high:
             if curr["close"] <= ema200:
                 return None
 
-            dist_ema200_pips = self._price_to_pips(abs(curr["close"] - ema200))
-            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
-                logger.debug(
-                    "SonicR Breakout BUY skipped: dist_ema200=%.0f pips > max=%.0f",
-                    dist_ema200_pips, self._bo_max_ema200_dist_pips,
-                )
+            if not self._ema200_dist_ok(curr, float(atr)):
+                return None
+
+            # Confirmation candle: close phải nằm ngoài PAC đủ sâu, không có râu ngược chiều
+            if not self._is_breakout_candle_ok(curr, "BUY", float(pac_high)):
+                logger.debug("SonicRFund Breakout BUY skipped: candle confirmation failed")
                 return None
 
             sl_lvl      = float(pac_low) - atr * self._sl_buffer_atr
@@ -294,11 +336,12 @@ class SonicRStrategy(BaseStrategy):
             if sl_distance <= 0:
                 return None
 
-            sl_pips = self._price_to_pips(sl_distance)
+            sl_pips          = self._price_to_pips(sl_distance)
+            dist_ema200_pips = self._price_to_pips(abs(float(curr["close"]) - float(ema200)))
             if sl_pips <= 0:
                 return None
             if self._max_sl_pips > 0 and sl_pips > self._max_sl_pips:
-                logger.debug("SonicR Breakout BUY skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
+                logger.debug("SonicRFund Breakout BUY skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
             lim = float(pac_high) if self._limit_entry else 0.0
@@ -310,6 +353,9 @@ class SonicRStrategy(BaseStrategy):
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         # ── SELL breakout ─────────────────────────────────────────────────────
@@ -317,12 +363,11 @@ class SonicRStrategy(BaseStrategy):
             if curr["close"] >= ema200:
                 return None
 
-            dist_ema200_pips = self._price_to_pips(abs(curr["close"] - ema200))
-            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
-                logger.debug(
-                    "SonicR Breakout SELL skipped: dist_ema200=%.0f pips > max=%.0f",
-                    dist_ema200_pips, self._bo_max_ema200_dist_pips,
-                )
+            if not self._ema200_dist_ok(curr, float(atr)):
+                return None
+
+            if not self._is_breakout_candle_ok(curr, "SELL", float(pac_low)):
+                logger.debug("SonicRFund Breakout SELL skipped: candle confirmation failed")
                 return None
 
             sl_lvl      = float(pac_high) + atr * self._sl_buffer_atr
@@ -330,11 +375,12 @@ class SonicRStrategy(BaseStrategy):
             if sl_distance <= 0:
                 return None
 
-            sl_pips = self._price_to_pips(sl_distance)
+            sl_pips          = self._price_to_pips(sl_distance)
+            dist_ema200_pips = self._price_to_pips(abs(float(curr["close"]) - float(ema200)))
             if sl_pips <= 0:
                 return None
             if self._max_sl_pips > 0 and sl_pips > self._max_sl_pips:
-                logger.debug("SonicR Breakout SELL skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
+                logger.debug("SonicRFund Breakout SELL skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
             lim = float(pac_low) if self._limit_entry else 0.0
@@ -346,6 +392,9 @@ class SonicRStrategy(BaseStrategy):
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         return None
@@ -353,7 +402,7 @@ class SonicRStrategy(BaseStrategy):
     # ── Layer 2: PAC Rejection ────────────────────────────────────────────────
 
     def _check_pac_rejection(
-        self, curr: pd.Series, prev: pd.Series
+        self, curr: pd.Series, prev: pd.Series, df: pd.DataFrame | None = None
     ) -> Signal | None:
         """
         MQ5 buyRej / sellRej — wick pierces PAC but close snaps back.
@@ -375,6 +424,11 @@ class SonicRStrategy(BaseStrategy):
         if not self._is_strong_body_avg(curr):
             return None
 
+        # Slope filter: PAC phải đang giãn rộng
+        if df is not None and not self._is_pac_fanning(df, curr):
+            logger.debug("SonicRFund Rejection skipped: PAC not fanning out")
+            return None
+
         # Rejection SL dùng sl_buffer_atr + rejection_extra_sl_atr để tránh nhiễu thị trường
         rej_buf = self._sl_buffer_atr + self._rej_extra_sl_atr
 
@@ -392,7 +446,7 @@ class SonicRStrategy(BaseStrategy):
             if sl_pips <= 0:
                 return None
             if self._max_sl_pips > 0 and sl_pips > self._max_sl_pips:
-                logger.debug("SonicR Rejection BUY skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
+                logger.debug("SonicRFund Rejection BUY skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
             lim = float(pac_high) if self._limit_entry else 0.0
@@ -404,6 +458,9 @@ class SonicRStrategy(BaseStrategy):
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         # ── SELL rejection ────────────────────────────────────────────────────
@@ -420,7 +477,7 @@ class SonicRStrategy(BaseStrategy):
             if sl_pips <= 0:
                 return None
             if self._max_sl_pips > 0 and sl_pips > self._max_sl_pips:
-                logger.debug("SonicR Rejection SELL skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
+                logger.debug("SonicRFund Rejection SELL skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
             lim = float(pac_low) if self._limit_entry else 0.0
@@ -432,6 +489,9 @@ class SonicRStrategy(BaseStrategy):
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         return None
@@ -520,14 +580,14 @@ class SonicRStrategy(BaseStrategy):
         recent_high  = float(ext_slice["high"].max())
         rr           = (recent_high - curr["close"]) / sl_distance if sl_distance > 0 else 0.0
         if rr < self._min_rr:
-            logger.debug("SonicR BUY skipped RR=%.2f < %.1f", rr, self._min_rr)
+            logger.debug("SonicRFund BUY skipped RR=%.2f < %.1f", rr, self._min_rr)
             return None
 
         sl_pips = self._price_to_pips(sl_distance)
         if sl_pips <= 0:
             return None
         if self._max_sl_pips > 0 and sl_pips > self._max_sl_pips:
-            logger.debug("SonicR BUY★ skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
+            logger.debug("SonicRFund BUY★ skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
             return None
 
         lim = float(pac_mid) if self._limit_entry else 0.0
@@ -617,14 +677,14 @@ class SonicRStrategy(BaseStrategy):
         recent_low  = float(ext_slice["low"].min())
         rr          = (curr["close"] - recent_low) / sl_distance if sl_distance > 0 else 0.0
         if rr < self._min_rr:
-            logger.debug("SonicR SELL skipped RR=%.2f < %.1f", rr, self._min_rr)
+            logger.debug("SonicRFund SELL skipped RR=%.2f < %.1f", rr, self._min_rr)
             return None
 
         sl_pips = self._price_to_pips(sl_distance)
         if sl_pips <= 0:
             return None
         if self._max_sl_pips > 0 and sl_pips > self._max_sl_pips:
-            logger.debug("SonicR SELL★ skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
+            logger.debug("SonicRFund SELL★ skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
             return None
 
         lim = float(pac_mid) if self._limit_entry else 0.0
@@ -784,6 +844,76 @@ class SonicRStrategy(BaseStrategy):
             (direction == "SELL" and bar["close"] < bar["open"])
         )
         return is_dir and (body >= range_ * self._strong_ratio)
+
+    def _is_pac_fanning(self, df: pd.DataFrame, curr: pd.Series) -> bool:
+        """
+        True khi khoảng cách EMA34–EMA89 đang giãn rộng (fanning out).
+        Nếu hai đường song song hoặc hội tụ → thị trường tích lũy → bỏ qua.
+        """
+        if not self._require_pac_fanning:
+            return True
+        if len(df) < self._pac_fan_lookback + 2:
+            return True
+        spread_now  = abs(float(curr["pac_mid"]) - float(curr["ema89"]))
+        prev        = df.iloc[-(self._pac_fan_lookback + 1)]
+        spread_prev = abs(float(prev.get("pac_mid", curr["pac_mid"])) - float(prev.get("ema89", curr["ema89"])))
+        return spread_now > spread_prev
+
+    def _is_breakout_candle_ok(self, curr: pd.Series, direction: str, pac_boundary: float) -> bool:
+        """
+        Xác nhận nến breakout:
+        1. Close nằm ngoài dải PAC ≥ breakout_min_close_body_pct × thân nến
+        2. Counter-wick (wick ngược chiều) ≤ breakout_max_counter_wick × full range
+
+        Ngăn fakeout: nến đóng cửa ngay sát PAC hoặc có râu dài ngược chiều
+        thường là dấu hiệu giá chưa thực sự thoát kênh.
+        """
+        body       = abs(float(curr["close"]) - float(curr["open"]))
+        full_range = float(curr["high"]) - float(curr["low"])
+
+        if direction == "BUY":
+            close_outside = float(curr["close"]) - pac_boundary
+            counter_wick  = float(min(curr["open"], curr["close"])) - float(curr["low"])
+        else:
+            close_outside = pac_boundary - float(curr["close"])
+            counter_wick  = float(curr["high"]) - float(max(curr["open"], curr["close"]))
+        counter_wick = max(0.0, counter_wick)
+
+        if self._bo_min_close_body_pct > 0 and body > 0:
+            if close_outside < self._bo_min_close_body_pct * body:
+                return False
+
+        if self._bo_max_counter_wick > 0 and full_range > 0:
+            if counter_wick / full_range > self._bo_max_counter_wick:
+                return False
+
+        return True
+
+    def _ema200_dist_ok(self, curr: pd.Series, atr: float) -> bool:
+        """
+        Kiểm tra khoảng cách Entry → EMA200 không vượt ngưỡng.
+        Ưu tiên ATR-based (breakout_max_ema200_dist_atr) nếu được cấu hình,
+        fallback về pips cố định (breakout_max_ema200_dist_pips).
+        """
+        dist = abs(float(curr["close"]) - float(curr["ema200"]))
+        if self._bo_max_ema200_dist_atr > 0 and atr > 0:
+            ok = dist <= self._bo_max_ema200_dist_atr * atr
+            if not ok:
+                logger.debug(
+                    "SonicR Breakout skipped: dist_ema200=%.2f > %.1f×ATR(%.2f)",
+                    dist, self._bo_max_ema200_dist_atr, atr,
+                )
+            return ok
+        if self._bo_max_ema200_dist_pips > 0:
+            dist_pips = self._price_to_pips(dist)
+            ok = dist_pips <= self._bo_max_ema200_dist_pips
+            if not ok:
+                logger.debug(
+                    "SonicR Breakout skipped: dist_ema200=%.0f pips > max=%.0f",
+                    dist_pips, self._bo_max_ema200_dist_pips,
+                )
+            return ok
+        return True
 
     def _is_sideways_no_dow(self, window: pd.DataFrame, atr: float) -> bool:
         """

@@ -236,11 +236,15 @@ class BacktestEngine:
                     "action":            signal.action,
                     "entry":             signal.entry,
                     "sl_pips":           signal.sl_pips,
-                    "sl_level":          signal.sl_level,       # absolute SL price
-                    "limit_price":       signal.limit_price,    # 0 = market order
+                    "sl_level":          signal.sl_level,
+                    "limit_price":       signal.limit_price,
                     "limit_expiry_bars": signal.limit_expiry_bars,
                     "timestamp":         df.iloc[i]["timestamp"],
-                    "notes":             (signal.notes or "").strip(),
+                    "notes":              (signal.notes or "").strip(),
+                    "breakeven_at_r":     float(getattr(signal, "breakeven_at_r", 0.0)),
+                    "partial_close_at_r": float(getattr(signal, "partial_close_at_r", 0.0)),
+                    "partial_close_ratio": float(getattr(signal, "partial_close_ratio", 0.5)),
+                    "partial_trail_pips": float(getattr(signal, "partial_trail_pips", 5.0)),
                 })
 
         logger.debug("Generated %d raw signals", len(signals))
@@ -418,8 +422,12 @@ class BacktestEngine:
         active_end_bars: list[int] = []
 
         for sig in signals:
-            sig_bar  = sig["bar_index"]
-            sig_notes = str(sig.get("notes") or "").strip()
+            sig_bar       = sig["bar_index"]
+            sig_notes           = str(sig.get("notes") or "").strip()
+            sig_be_r            = float(sig.get("breakeven_at_r", 0.0))
+            sig_partial_r       = float(sig.get("partial_close_at_r", 0.0))
+            sig_partial_ratio   = float(sig.get("partial_close_ratio", 0.5))
+            sig_partial_trail   = float(sig.get("partial_trail_pips", 5.0))
             if sig_bar in used_signal_bars:
                 continue
 
@@ -430,8 +438,8 @@ class BacktestEngine:
                 continue
 
             action      = sig["action"]
-            sl_pips_sig = sig["sl_pips"]       # pips from signal close → SL level
-            sl_level    = sig.get("sl_level", 0.0)   # absolute SL price (if provided)
+            sl_pips_sig = sig["sl_pips"]
+            sl_level    = sig.get("sl_level", 0.0)
             limit_price = sig.get("limit_price", 0.0)
             expiry      = sig.get("limit_expiry_bars") or self._DEFAULT_LIMIT_EXPIRY
 
@@ -496,25 +504,30 @@ class BacktestEngine:
                 bal = self._equity_before_entry_bar(trades, fill_bar, symbol)
                 volume  = self._calc_lot(actual_sl_pips, symbol, risk_pct, balance=bal)
                 outcome = self._find_outcome(
-                    df, fill_bar + 1, action, sl_price, tp_price, pip_size, entry_price=entry,
+                    df, fill_bar + 1, action, sl_price, tp_price, pip_size,
+                    entry_price=entry, breakeven_at_r=sig_be_r,
+                    partial_close_at_r=sig_partial_r,
+                    partial_close_ratio=sig_partial_ratio,
+                    partial_trail_pips=sig_partial_trail,
                 )
 
                 trades.append({
-                    "bar_index":   sig_bar,
-                    "timestamp":   df.iloc[fill_bar]["timestamp"],
-                    "action":      action,
-                    "order_type":  "LIMIT",
-                    "entry":       round(entry, 5),
-                    "sl":          round(sl_price, 5),
-                    "tp":          round(tp_price, 5),
-                    "sl_pips":     round(actual_sl_pips, 1),
-                    "volume":      volume,
-                    "result":      outcome["result"],
-                    "exit_bar":    outcome["exit_bar"],
-                    "exit_price":  outcome["exit_price"],
-                    "pips":        outcome["pips"],
+                    "bar_index":      sig_bar,
+                    "timestamp":      df.iloc[fill_bar]["timestamp"],
+                    "action":         action,
+                    "order_type":     "LIMIT",
+                    "entry":          round(entry, 5),
+                    "sl":             round(sl_price, 5),
+                    "tp":             round(tp_price, 5),
+                    "sl_pips":        round(actual_sl_pips, 1),
+                    "volume":         volume,
+                    "result":         outcome["result"],
+                    "exit_bar":       outcome["exit_bar"],
+                    "exit_price":     outcome["exit_price"],
+                    "pips":           outcome["pips"],
                     "exit_timestamp": self._timestamp_at_bar(df, outcome["exit_bar"]),
-                    "notes":       sig_notes,
+                    "notes":          sig_notes,
+                    "breakeven_at_r": sig_be_r,
                 })
                 active_end_bars.append(outcome["exit_bar"])
                 used_signal_bars.add(sig_bar)
@@ -538,25 +551,30 @@ class BacktestEngine:
                 bal = self._equity_before_entry_bar(trades, entry_bar, symbol)
                 volume  = self._calc_lot(sl_pips_sig, symbol, risk_pct, balance=bal)
                 outcome = self._find_outcome(
-                    df, entry_bar, action, sl_price, tp_price, pip_size, entry_price=entry,
+                    df, entry_bar, action, sl_price, tp_price, pip_size,
+                    entry_price=entry, breakeven_at_r=sig_be_r,
+                    partial_close_at_r=sig_partial_r,
+                    partial_close_ratio=sig_partial_ratio,
+                    partial_trail_pips=sig_partial_trail,
                 )
 
                 trades.append({
-                    "bar_index":   sig_bar,
-                    "timestamp":   sig["timestamp"],
-                    "action":      action,
-                    "order_type":  "MARKET",
-                    "entry":       round(entry, 5),
-                    "sl":          round(sl_price, 5),
-                    "tp":          round(tp_price, 5),
-                    "sl_pips":     sl_pips_sig,
-                    "volume":      volume,
-                    "result":      outcome["result"],
-                    "exit_bar":    outcome["exit_bar"],
-                    "exit_price":  outcome["exit_price"],
-                    "pips":        outcome["pips"],
+                    "bar_index":      sig_bar,
+                    "timestamp":      sig["timestamp"],
+                    "action":         action,
+                    "order_type":     "MARKET",
+                    "entry":          round(entry, 5),
+                    "sl":             round(sl_price, 5),
+                    "tp":             round(tp_price, 5),
+                    "sl_pips":        sl_pips_sig,
+                    "volume":         volume,
+                    "result":         outcome["result"],
+                    "exit_bar":       outcome["exit_bar"],
+                    "exit_price":     outcome["exit_price"],
+                    "pips":           outcome["pips"],
                     "exit_timestamp": self._timestamp_at_bar(df, outcome["exit_bar"]),
-                    "notes":       sig_notes,
+                    "notes":          sig_notes,
+                    "breakeven_at_r": sig_be_r,
                 })
                 active_end_bars.append(outcome["exit_bar"])
                 used_signal_bars.add(sig_bar)
@@ -572,42 +590,123 @@ class BacktestEngine:
         tp: float,
         pip_size: float,
         entry_price: float,
+        breakeven_at_r: float = 0.0,
+        partial_close_at_r: float = 0.0,
+        partial_close_ratio: float = 0.5,
+        partial_trail_pips: float = 5.0,
     ) -> dict:
         """
         Walk forward from start_bar to find SL or TP hit.
 
-        Pips are always vs the *actual fill price* (entry_price), not the prior
-        bar's close — required so LIMIT fills match reported P&L (a limit at
-        5054.38 is not the same as that bar's close).
+        Pips are always vs the *actual fill price* (entry_price).
+
+        breakeven_at_r > 0: dời SL về entry khi lãi ≥ N×SL (BE trailing).
+        partial_close_at_r > 0: chốt partial_close_ratio phần khi lãi ≥ N×SL,
+          dời SL thêm partial_trail_pips về phía entry. Blended P&L trả về.
+          result = "PARTIAL" nếu phần còn lại thoát qua SL, "TP" nếu đạt TP.
+        Nếu cả hai bật cùng lúc: partial_close ưu tiên (BE bị bỏ qua).
         """
-        ep = float(entry_price)
+        ep      = float(entry_price)
+        sl_dist = abs(ep - float(sl))
+        cur_sl  = float(sl)
+        pip_sz  = float(pip_size)
+        be_moved      = False
+        partial_done  = False
+        partial_pips  = 0.0
+        partial_bar   = -1
+
+        # SL trail distance after partial: entry ± partial_trail_pips
+        trail_dist = float(partial_trail_pips) * pip_sz
 
         for i in range(start_bar, len(df)):
             row  = df.iloc[i]
-            high = row["high"]
-            low  = row["low"]
+            high = float(row["high"])
+            low  = float(row["low"])
 
             if action == "BUY":
-                if low <= sl:
-                    pips = (sl - ep) / pip_size
-                    return {"result": "SL", "exit_bar": i, "exit_price": sl, "pips": pips}
+                # 1. TP always wins first
                 if high >= tp:
-                    pips = (tp - ep) / pip_size
-                    return {"result": "TP", "exit_bar": i, "exit_price": tp, "pips": pips}
-            else:
-                if high >= sl:
-                    pips = (ep - sl) / pip_size
-                    return {"result": "SL", "exit_bar": i, "exit_price": sl, "pips": pips}
+                    pips_full = (tp - ep) / pip_sz
+                    if partial_done:
+                        ratio = float(partial_close_ratio)
+                        pips  = ratio * partial_pips + (1.0 - ratio) * pips_full
+                        return {"result": "TP", "exit_bar": i, "exit_price": tp,
+                                "pips": pips, "partial_bar": partial_bar}
+                    return {"result": "TP", "exit_bar": i, "exit_price": tp, "pips": pips_full}
+
+                # 2. Partial close trigger (runs once)
+                if partial_close_at_r > 0 and not partial_done and sl_dist > 0:
+                    trigger = ep + sl_dist * float(partial_close_at_r)
+                    if high >= trigger:
+                        partial_done = True
+                        partial_pips = (trigger - ep) / pip_sz
+                        partial_bar  = i
+                        new_sl       = ep + trail_dist
+                        cur_sl       = max(cur_sl, new_sl)
+
+                # 3. Break-even (only if no partial close configured)
+                if breakeven_at_r > 0 and not be_moved and not partial_done and sl_dist > 0:
+                    if high >= ep + sl_dist * float(breakeven_at_r):
+                        cur_sl   = ep
+                        be_moved = True
+
+                # 4. SL / BE exit
+                if low <= cur_sl:
+                    if partial_done:
+                        ratio      = float(partial_close_ratio)
+                        pips_rem   = (cur_sl - ep) / pip_sz
+                        pips       = ratio * partial_pips + (1.0 - ratio) * pips_rem
+                        return {"result": "PARTIAL", "exit_bar": i, "exit_price": cur_sl,
+                                "pips": pips, "partial_bar": partial_bar}
+                    pips   = (cur_sl - ep) / pip_sz
+                    result = "BE" if be_moved else "SL"
+                    return {"result": result, "exit_bar": i, "exit_price": cur_sl, "pips": pips}
+
+            else:  # SELL
+                # 1. TP
                 if low <= tp:
-                    pips = (ep - tp) / pip_size
-                    return {"result": "TP", "exit_bar": i, "exit_price": tp, "pips": pips}
+                    pips_full = (ep - tp) / pip_sz
+                    if partial_done:
+                        ratio = float(partial_close_ratio)
+                        pips  = ratio * partial_pips + (1.0 - ratio) * pips_full
+                        return {"result": "TP", "exit_bar": i, "exit_price": tp,
+                                "pips": pips, "partial_bar": partial_bar}
+                    return {"result": "TP", "exit_bar": i, "exit_price": tp, "pips": pips_full}
+
+                # 2. Partial close trigger
+                if partial_close_at_r > 0 and not partial_done and sl_dist > 0:
+                    trigger = ep - sl_dist * float(partial_close_at_r)
+                    if low <= trigger:
+                        partial_done = True
+                        partial_pips = (ep - trigger) / pip_sz
+                        partial_bar  = i
+                        new_sl       = ep - trail_dist
+                        cur_sl       = min(cur_sl, new_sl)
+
+                # 3. Break-even
+                if breakeven_at_r > 0 and not be_moved and not partial_done and sl_dist > 0:
+                    if low <= ep - sl_dist * float(breakeven_at_r):
+                        cur_sl   = ep
+                        be_moved = True
+
+                # 4. SL exit
+                if high >= cur_sl:
+                    if partial_done:
+                        ratio    = float(partial_close_ratio)
+                        pips_rem = (ep - cur_sl) / pip_sz
+                        pips     = ratio * partial_pips + (1.0 - ratio) * pips_rem
+                        return {"result": "PARTIAL", "exit_bar": i, "exit_price": cur_sl,
+                                "pips": pips, "partial_bar": partial_bar}
+                    pips   = (ep - cur_sl) / pip_sz
+                    result = "BE" if be_moved else "SL"
+                    return {"result": result, "exit_bar": i, "exit_price": cur_sl, "pips": pips}
 
         # Trade still open at end of data — mark-to-market at last bar
         last_close = float(df.iloc[-1]["close"])
         if action == "BUY":
-            pips = (last_close - ep) / pip_size
+            pips = (last_close - ep) / pip_sz
         else:
-            pips = (ep - last_close) / pip_size
+            pips = (ep - last_close) / pip_sz
         return {"result": "OPEN", "exit_bar": len(df) - 1, "exit_price": last_close, "pips": pips}
 
     # ── Metrics ───────────────────────────────────────────────────────────────

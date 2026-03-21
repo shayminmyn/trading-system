@@ -20,7 +20,7 @@ from pathlib import Path
 from src.utils import get_logger, ConfigLoader, print_runtime_info, get_optimal_workers
 from src.data import DataManager, HistoricalLoader
 from src.data.mock_source import generate_ohlcv
-from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, HiddenDivergenceStrategy
+from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, SonicRFundStrategy, HiddenDivergenceStrategy
 from src.backtest import BacktestEngine, ReportGenerator
 
 logger = get_logger("backtest", log_file="logs/trading.log")
@@ -29,6 +29,7 @@ _STRATEGY_REGISTRY = {
     # "MACDCrossover": MACDCrossoverStrategy,
     # "RSI_EMA": RSI_EMA_Strategy,
     "SonicR": SonicRStrategy,
+    "SonicRFund": SonicRFundStrategy,
     "HiddenDivergence": HiddenDivergenceStrategy,
 }
 

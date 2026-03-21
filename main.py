@@ -24,7 +24,7 @@ from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 from src.utils import get_logger, ConfigLoader, print_runtime_info, is_gil_enabled, get_optimal_workers
 from src.utils.paper_exit import paper_bar_exit
 from src.data import DataManager
-from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy
+from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, SonicRFundStrategy
 from src.risk import RiskManager
 from src.notifier import TelegramNotifier
 
@@ -34,6 +34,7 @@ _STRATEGY_REGISTRY = {
     "MACDCrossover": MACDCrossoverStrategy,
     "RSI_EMA": RSI_EMA_Strategy,
     "SonicR": SonicRStrategy,
+    "SonicRFund": SonicRFundStrategy,
 }
 
 
