@@ -69,6 +69,69 @@ Parameters (config.yaml → strategies.SonicR)
   ─── Trailing Break-even ──────────────────────────────────────────────
   breakeven_at_r         : float 0.0    Move SL to entry when profit ≥ N×SL (0=off)
 
+  ─── Opt-1: EMA Dual Slope Filter ────────────────────────────────────
+  require_ema_slope      : bool  False  Cả EMA34 và EMA89 phải có độ dốc rõ ràng
+  min_slope_pips_per_bar : float 0.5    Ngưỡng tối thiểu pips/nến (tương đương ~30°)
+
+  ─── Opt-2: Swing-based ATR SL ───────────────────────────────────────
+  use_swing_sl           : bool  False  Dùng Swing High/Low + ATR thay vì PAC band
+  swing_sl_lookback      : int   10     Số nến nhìn lại để tìm Swing High/Low
+  swing_sl_atr_mult      : float 1.5    Khoảng đệm = N × ATR ngoài Swing point
+
+  ─── Opt-3: Three-Bar Confirmation (PAC Breakout only) ───────────────
+  require_bo_confirmation: bool  False  Bật quy tắc xác nhận nến Breakout
+  bo_marubozu_ratio      : float 0.8    Thân nến ≥ N×range → chấp nhận vào ngay
+
+  ─── Opt-4: ATR-based SL (SL = Entry ± N×ATR) ───────────────────────
+  use_atr_sl             : bool  False  Thay thế tất cả SL bằng Entry ± N×ATR
+  atr_sl_mult            : float 1.5    SL = Entry ± atr_sl_mult × ATR
+
+  ─── Opt-5: Close-confirmation touch (no wick entry) ─────────────────
+  use_close_for_ema_touch: bool  False  Dùng close thay low/high khi kiểm tra EMA touch
+                                         Tránh vào lệnh chỉ vì râu nến chạm EMA (M15)
+
+  ─── Opt-6: EMA200 global trend filter ───────────────────────────────
+  require_ema200_trend   : bool  False  BUY chỉ khi close > EMA200, SELL ngược lại
+                                         Áp dụng cho TẤT CẢ layers (không chỉ Breakout)
+
+  ─── Opt-7: Max SL relative to ATR ──────────────────────────────────
+  max_sl_atr_mult        : float 0.0    Bỏ qua lệnh nếu SL > N×ATR (0=tắt)
+                                         Ví dụ 5.0 = bỏ lệnh có SL > 5×ATR
+
+  ─── Opt-8: Partial close / TP1 scalp ────────────────────────────────
+  partial_close_at_r     : float 0.0    Đóng partial_close_ratio khi lời ≥ N×SL (0=tắt)
+  partial_close_ratio    : float 0.5    Tỷ lệ khối lượng đóng (0.5 = 50%)
+  partial_trail_pips     : float 5.0    Dời SL thêm N pips sau partial close
+
+  ─── Opt-9: Phiên giao dịch (Time Filter) ────────────────────────────
+  allowed_hours_utc      : list  []     Giờ UTC được phép vào lệnh (rỗng = mọi giờ)
+                                         Ví dụ [7,8,...,16,19,20,21] = EU+US session
+
+  ─── Opt-10: ADX Trend Strength Filter ───────────────────────────────
+  adx_period             : int   14     ADX lookback period
+  adx_filter_min         : float 0.0   Bỏ qua khi ADX < N (0=tắt). Khuyến nghị: 25
+
+  ─── Opt-11: Linear Regression Slope Filter (EMA89) ──────────────────
+  use_linreg_slope       : bool  False  Dùng hồi quy tuyến tính thay vì first/last slope
+  linreg_slope_lookback  : int   10     Số nến cho hồi quy (M5: 20, H1: 8)
+  linreg_slope_thresh    : float 0.05   |slope| < thresh (pips/bar) → sideway → bỏ qua
+
+  ─── Opt-12: Dragon Tunnel Zigzag Filter ─────────────────────────────
+  dragon_zigzag_filter   : bool  False  Bật bộ lọc zig-zag qua dải EMA34 High/Low
+  dragon_zigzag_lookback : int   10     Số nến nhìn lại
+  dragon_zigzag_max_crosses: int 3      Nếu giá đổi vùng (above/inside/below) ≥ N lần → sideway
+
+  ─── Opt-13: Absolute EMA Gap Filter ─────────────────────────────────
+  min_ema_gap_pips       : float 0.0    Khoảng cách tuyệt đối (pips) tối thiểu giữa EMA34 (pac_mid)
+                                         và EMA89. Nếu gap < N pips → EMA đi sát nhau → sideway → skip
+                                         Ví dụ: 50 pips cho XAUUSD M5 (0=tắt)
+
+  ─── Opt-14: Minimum SL Width ────────────────────────────────────────
+  min_sl_pips            : float 0.0    Chiều rộng SL tối thiểu tính bằng pips. Nếu SL tính được
+                                         < N pips, SL sẽ được kéo ra đến N pips (dùng Swing H/L làm
+                                         cơ sở nếu nó rộng hơn). Đảm bảo SL đủ "thở" trên M5.
+                                         Ví dụ: 150 pips cho XAUUSD M5 (0=tắt)
+
   ─── Sideways Oscillation signal ──────────────────────────────────────
   enable_sw_signal       : bool  True
   sw_lookback            : int   30     Min bars to confirm sideway
@@ -81,7 +144,8 @@ Parameters (config.yaml → strategies.SonicR)
 from __future__ import annotations
 
 import pandas as pd
-from ta.trend import EMAIndicator
+import numpy as np
+from ta.trend import ADXIndicator, EMAIndicator
 from ta.volatility import AverageTrueRange
 
 from .base_strategy import BaseStrategy, Signal
@@ -145,6 +209,65 @@ class SonicRStrategy(BaseStrategy):
         # ── Trailing Break-even ───────────────────────────────────────────────
         self._breakeven_at_r: float    = float(p.get("breakeven_at_r", 0.0))
 
+        # ── Opt-1: EMA Dual Slope Filter ─────────────────────────────────────
+        self._require_ema_slope: bool       = bool(p.get("require_ema_slope", False))
+        self._min_slope_pips_per_bar: float = float(p.get("min_slope_pips_per_bar", 0.5))
+
+        # ── Opt-2: Swing-based ATR SL ─────────────────────────────────────────
+        self._use_swing_sl: bool         = bool(p.get("use_swing_sl", False))
+        self._swing_sl_lookback: int     = max(3, int(p.get("swing_sl_lookback", 10)))
+        self._swing_sl_atr_mult: float   = float(p.get("swing_sl_atr_mult", 1.5))
+
+        # ── Opt-3: Three-Bar Confirmation ─────────────────────────────────────
+        self._require_bo_confirmation: bool = bool(p.get("require_bo_confirmation", False))
+        self._bo_marubozu_ratio: float      = float(p.get("bo_marubozu_ratio", 0.8))
+
+        # ── Opt-4: ATR-based SL (Entry ± N×ATR) ──────────────────────────────
+        self._use_atr_sl: bool         = bool(p.get("use_atr_sl", False))
+        self._atr_sl_mult: float       = float(p.get("atr_sl_mult", 1.5))
+
+        # ── Opt-5: Close-confirmation touch (no wick entry) ───────────────────
+        self._use_close_for_ema_touch: bool = bool(p.get("use_close_for_ema_touch", False))
+
+        # ── Opt-6: EMA200 global trend filter ────────────────────────────────
+        self._require_ema200_trend: bool = bool(p.get("require_ema200_trend", False))
+
+        # ── Opt-7: Max SL relative to ATR ─────────────────────────────────────
+        self._max_sl_atr_mult: float = float(p.get("max_sl_atr_mult", 0.0))
+
+        # ── Opt-8: Partial close / TP1 scalp ─────────────────────────────────
+        self._partial_close_at_r: float  = float(p.get("partial_close_at_r", 0.0))
+        self._partial_close_ratio: float = float(p.get("partial_close_ratio", 0.5))
+        self._partial_trail_pips: float  = float(p.get("partial_trail_pips", 5.0))
+
+        # ── Opt-9: Phiên giao dịch (Time Filter) ─────────────────────────────
+        _raw_hours = p.get("allowed_hours_utc", [])
+        self._allowed_hours_utc: set[int] = (
+            set(int(h) for h in _raw_hours) if _raw_hours else set()
+        )
+
+        # ── Opt-10: ADX Filter ────────────────────────────────────────────────
+        self._adx_period: int        = max(2, int(p.get("adx_period", 14)))
+        self._adx_filter_min: float  = float(p.get("adx_filter_min", 0.0))
+
+        # ── Opt-11: Linear Regression Slope Filter ────────────────────────────
+        self._use_linreg_slope: bool       = bool(p.get("use_linreg_slope", False))
+        self._linreg_slope_lookback: int   = max(5, int(p.get("linreg_slope_lookback", 10)))
+        self._linreg_slope_thresh: float   = float(p.get("linreg_slope_thresh", 0.05))
+
+        # ── Opt-12: Dragon Tunnel Zigzag Filter ───────────────────────────────
+        self._dragon_zigzag_filter: bool    = bool(p.get("dragon_zigzag_filter", False))
+        self._dragon_zigzag_lookback: int   = max(3, int(p.get("dragon_zigzag_lookback", 10)))
+        self._dragon_zigzag_max_crosses: int = max(1, int(p.get("dragon_zigzag_max_crosses", 3)))
+
+        # ── Opt-13: Absolute EMA Gap Filter ───────────────────────────────────
+        # Khoảng cách pips tuyệt đối giữa EMA34 (pac_mid) và EMA89. 0 = tắt.
+        self._min_ema_gap_pips: float = float(p.get("min_ema_gap_pips", 0.0))
+
+        # ── Opt-14: Minimum SL Width ───────────────────────────────────────────
+        # SL tối thiểu tính bằng pips; kéo ra nếu SL tính được hẹp hơn. 0 = tắt.
+        self._min_sl_pips: float = float(p.get("min_sl_pips", 0.0))
+
         # ── Sideways oscillation ──────────────────────────────────────────────
         self._enable_sw: bool          = bool(p.get("enable_sw_signal", True))
         self._sw_lookback: int         = p.get("sw_lookback", 30)
@@ -185,6 +308,13 @@ class SonicRStrategy(BaseStrategy):
             window=self._atr_period,
         ).average_true_range()
 
+        # ADX — trend strength (Opt-10)
+        adx_ind = ADXIndicator(
+            high=df["high"], low=df["low"], close=df["close"],
+            window=self._adx_period, fillna=True,
+        )
+        df["adx"] = adx_ind.adx()
+
         # Volume MA (tick volume proxy)
         df["vol_ma"] = df["volume"].rolling(window=self._vol_ma_len, min_periods=1).mean()
 
@@ -213,27 +343,47 @@ class SonicRStrategy(BaseStrategy):
             _ts = _ts.tz_localize("UTC")
         else:
             _ts = _ts.tz_convert("UTC")
-        if _ts < pd.Timestamp("2026-01-01", tz="UTC"):
+        if _ts < pd.Timestamp("2026-02-01", tz="UTC"):
             return self._no_signal()
 
         if curr["atr"] <= 0 or pd.isna(curr["atr"]):
             return self._no_signal()
 
+        # ── Opt-9: Time / Session Filter ───────────────────────────────────────
+        if not self._is_trade_hour_ok(curr):
+            return self._no_signal()
+
+        # ── Opt-10: ADX Filter (direction-agnostic, gate tất cả layers) ────────
+        if not self._adx_ok(curr):
+            return self._no_signal()
+
+        # ── Opt-12: Dragon Zigzag Filter (sideway detection, gate tất cả layers)
+        if not self._dragon_no_zigzag(df):
+            return self._no_signal()
+
+        # ── Opt-13: Absolute EMA Gap Filter (gate tất cả layers) ──────────────
+        if not self._ema_gap_ok(curr):
+            return self._no_signal()
+
         # ── Layer 1+2: PAC breakout / rejection (from MQ5) ────────────────────
         if self._enable_pac:
             if self._rejection_priority:
-                # Ưu tiên Rejection: SL ngắn hơn, RR tốt hơn
-                sig = self._check_pac_rejection(curr, prev)
+                sig = self._check_pac_rejection(curr, prev, df)
                 if sig is not None:
                     return sig
-                sig = self._check_pac_breakout(curr, prev)
+                sig = self._check_pac_breakout(curr, prev, df)
                 if sig is not None:
                     return sig
             else:
-                sig = self._check_pac_breakout(curr, prev)
+                sig = self._check_pac_breakout(curr, prev, df)
                 if sig is not None:
                     return sig
-                sig = self._check_pac_rejection(curr, prev)
+                sig = self._check_pac_rejection(curr, prev, df)
+                if sig is not None:
+                    return sig
+            # Opt-3 retest entry (when main breakout was non-Marubozu)
+            if self._require_bo_confirmation:
+                sig = self._check_pac_breakout_retest(df, curr, prev)
                 if sig is not None:
                     return sig
 
@@ -255,21 +405,19 @@ class SonicRStrategy(BaseStrategy):
     # ── Layer 1: PAC Breakout ─────────────────────────────────────────────────
 
     def _check_pac_breakout(
-        self, curr: pd.Series, prev: pd.Series
+        self,
+        curr: pd.Series,
+        prev: pd.Series,
+        df: pd.DataFrame | None = None,
     ) -> Signal | None:
         """
-        MQ5 buyCond / sellCond:
-          BUY : prev close ≤ pac_high AND curr close > pac_high
-                AND close > ema200 AND vol_ok AND strong_body
-          SELL: prev close ≥ pac_low  AND curr close < pac_low
-                AND close < ema200 AND vol_ok AND strong_body
-
-        SL: opposite PAC band ± sl_buffer_atr × ATR
+        MQ5 buyCond / sellCond. Supports Opt-1 slope, Opt-2 swing SL,
+        Opt-3 Marubozu, Opt-4 ATR SL.
         """
         pac_high = curr["pac_high"]
         pac_low  = curr["pac_low"]
         ema200   = curr["ema200"]
-        atr      = curr["atr"]
+        atr      = float(curr["atr"])
 
         if not self._is_volume_ok(curr, self._vol_ratio_bo):
             return None
@@ -280,20 +428,36 @@ class SonicRStrategy(BaseStrategy):
         if prev["close"] <= prev["pac_high"] and curr["close"] > pac_high:
             if curr["close"] <= ema200:
                 return None
-
-            dist_ema200_pips = self._price_to_pips(abs(curr["close"] - ema200))
-            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
-                logger.debug(
-                    "SonicR Breakout BUY skipped: dist_ema200=%.0f pips > max=%.0f",
-                    dist_ema200_pips, self._bo_max_ema200_dist_pips,
-                )
+            # Opt-1
+            if df is not None and not self._is_dual_slope_valid(df, curr, "BUY"):
+                return None
+            if df is not None and not self._linreg_slope_ok(df, "BUY"):
+                return None
+            # Opt-3
+            if self._require_bo_confirmation and not self._is_marubozu(curr, "BUY"):
+                logger.debug("SonicR Breakout BUY: not Marubozu → waiting for retest")
                 return None
 
-            sl_lvl      = float(pac_low) - atr * self._sl_buffer_atr
-            sl_distance = curr["close"] - sl_lvl
+            dist_ema200_pips = self._price_to_pips(abs(float(curr["close"]) - float(ema200)))
+            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
+                return None
+
+            entry = float(curr["close"])
+            # Opt-4 ATR SL; Opt-2 Swing SL; fallback PAC SL
+            sl_lvl = self._override_sl_if_atr(entry, atr, "BUY")
+            if sl_lvl is None:
+                if self._use_swing_sl and df is not None:
+                    sl_lvl = self._calc_swing_sl(df, atr, "BUY")
+                if not self._use_swing_sl or df is None or sl_lvl is None or sl_lvl >= entry:
+                    sl_lvl = float(pac_low) - atr * self._sl_buffer_atr
+            # Opt-14: enforce minimum SL width
+            sl_lvl = self._enforce_min_sl(sl_lvl, entry, "BUY")
+
+            sl_distance = entry - sl_lvl
             if sl_distance <= 0:
                 return None
-
+            if not self._sl_within_atr_cap(sl_distance, atr):
+                return None
             sl_pips = self._price_to_pips(sl_distance)
             if sl_pips <= 0:
                 return None
@@ -301,35 +465,52 @@ class SonicRStrategy(BaseStrategy):
                 logger.debug("SonicR Breakout BUY skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
+            sl_src = "atr" if self._use_atr_sl else ("swing" if self._use_swing_sl else "pac")
             lim = float(pac_high) if self._limit_entry else 0.0
             return self._make_signal(
-                "BUY", curr["close"], sl_pips,
+                "BUY", entry, sl_pips,
                 f"PAC-Breakout BUY | pac_high={pac_high:.5f} ema200={ema200:.5f}"
-                f" dist_ema200={dist_ema200_pips:.0f}p sl={sl_pips:.0f}p",
+                f" dist_ema200={dist_ema200_pips:.0f}p sl={sl_pips:.0f}p sl_src={sl_src}",
                 limit_price=lim,
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         # ── SELL breakout ─────────────────────────────────────────────────────
         if prev["close"] >= prev["pac_low"] and curr["close"] < pac_low:
             if curr["close"] >= ema200:
                 return None
-
-            dist_ema200_pips = self._price_to_pips(abs(curr["close"] - ema200))
-            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
-                logger.debug(
-                    "SonicR Breakout SELL skipped: dist_ema200=%.0f pips > max=%.0f",
-                    dist_ema200_pips, self._bo_max_ema200_dist_pips,
-                )
+            if df is not None and not self._is_dual_slope_valid(df, curr, "SELL"):
+                return None
+            if df is not None and not self._linreg_slope_ok(df, "SELL"):
+                return None
+            if self._require_bo_confirmation and not self._is_marubozu(curr, "SELL"):
+                logger.debug("SonicR Breakout SELL: not Marubozu → waiting for retest")
                 return None
 
-            sl_lvl      = float(pac_high) + atr * self._sl_buffer_atr
-            sl_distance = sl_lvl - curr["close"]
+            dist_ema200_pips = self._price_to_pips(abs(float(curr["close"]) - float(ema200)))
+            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
+                return None
+
+            entry = float(curr["close"])
+            sl_lvl = self._override_sl_if_atr(entry, atr, "SELL")
+            if sl_lvl is None:
+                if self._use_swing_sl and df is not None:
+                    sl_lvl = self._calc_swing_sl(df, atr, "SELL")
+                if not self._use_swing_sl or df is None or sl_lvl is None or sl_lvl <= entry:
+                    sl_lvl = float(pac_high) + atr * self._sl_buffer_atr
+            # Opt-14: enforce minimum SL width
+            sl_lvl = self._enforce_min_sl(sl_lvl, entry, "SELL")
+
+            sl_distance = sl_lvl - entry
             if sl_distance <= 0:
                 return None
-
+            if not self._sl_within_atr_cap(sl_distance, atr):
+                return None
             sl_pips = self._price_to_pips(sl_distance)
             if sl_pips <= 0:
                 return None
@@ -337,15 +518,19 @@ class SonicRStrategy(BaseStrategy):
                 logger.debug("SonicR Breakout SELL skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
+            sl_src = "atr" if self._use_atr_sl else ("swing" if self._use_swing_sl else "pac")
             lim = float(pac_low) if self._limit_entry else 0.0
             return self._make_signal(
-                "SELL", curr["close"], sl_pips,
+                "SELL", entry, sl_pips,
                 f"PAC-Breakout SELL | pac_low={pac_low:.5f} ema200={ema200:.5f}"
-                f" dist_ema200={dist_ema200_pips:.0f}p sl={sl_pips:.0f}p",
+                f" dist_ema200={dist_ema200_pips:.0f}p sl={sl_pips:.0f}p sl_src={sl_src}",
                 limit_price=lim,
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         return None
@@ -353,7 +538,10 @@ class SonicRStrategy(BaseStrategy):
     # ── Layer 2: PAC Rejection ────────────────────────────────────────────────
 
     def _check_pac_rejection(
-        self, curr: pd.Series, prev: pd.Series
+        self,
+        curr: pd.Series,
+        prev: pd.Series,
+        df: pd.DataFrame | None = None,
     ) -> Signal | None:
         """
         MQ5 buyRej / sellRej — wick pierces PAC but close snaps back.
@@ -375,19 +563,35 @@ class SonicRStrategy(BaseStrategy):
         if not self._is_strong_body_avg(curr):
             return None
 
-        # Rejection SL dùng sl_buffer_atr + rejection_extra_sl_atr để tránh nhiễu thị trường
         rej_buf = self._sl_buffer_atr + self._rej_extra_sl_atr
 
         # ── BUY rejection ─────────────────────────────────────────────────────
         if curr["low"] < pac_high and curr["close"] > pac_high:
             if not (curr["close"] > ema89 and curr["close"] > curr["open"]):
                 return None
-
-            sl_lvl      = float(curr["low"]) - atr * rej_buf
-            sl_distance = curr["close"] - sl_lvl
-            if sl_distance <= 0:
+            if not self._ema200_trend_ok(curr, "BUY"):
+                return None
+            if df is not None and not self._is_dual_slope_valid(df, curr, "BUY"):
+                return None
+            if df is not None and not self._linreg_slope_ok(df, "BUY"):
                 return None
 
+            entry = float(curr["close"])
+            atr_f = float(atr)
+            sl_lvl = self._override_sl_if_atr(entry, atr_f, "BUY")
+            if sl_lvl is None:
+                if self._use_swing_sl and df is not None:
+                    sl_lvl = self._calc_swing_sl(df, atr_f, "BUY")
+                if not self._use_swing_sl or df is None or sl_lvl is None or sl_lvl >= entry:
+                    sl_lvl = float(curr["low"]) - atr_f * rej_buf
+            # Opt-14: enforce minimum SL width
+            sl_lvl = self._enforce_min_sl(sl_lvl, entry, "BUY")
+
+            sl_distance = entry - sl_lvl
+            if sl_distance <= 0:
+                return None
+            if not self._sl_within_atr_cap(sl_distance, atr_f):
+                return None
             sl_pips = self._price_to_pips(sl_distance)
             if sl_pips <= 0:
                 return None
@@ -395,27 +599,48 @@ class SonicRStrategy(BaseStrategy):
                 logger.debug("SonicR Rejection BUY skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
+            sl_src = "atr" if self._use_atr_sl else ("swing" if self._use_swing_sl else f"{rej_buf:.2f}×ATR")
             lim = float(pac_high) if self._limit_entry else 0.0
             return self._make_signal(
-                "BUY", curr["close"], sl_pips,
+                "BUY", entry, sl_pips,
                 f"PAC-Rejection BUY | pac_high={pac_high:.5f} ema89={ema89:.5f}"
-                f" sl={sl_pips:.0f}p buf={rej_buf:.2f}×ATR",
+                f" sl={sl_pips:.0f}p sl_src={sl_src}",
                 limit_price=lim,
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         # ── SELL rejection ────────────────────────────────────────────────────
         if curr["high"] > pac_low and curr["close"] < pac_low:
             if not (curr["close"] < ema89 and curr["close"] < curr["open"]):
                 return None
-
-            sl_lvl      = float(curr["high"]) + atr * rej_buf
-            sl_distance = sl_lvl - curr["close"]
-            if sl_distance <= 0:
+            if not self._ema200_trend_ok(curr, "SELL"):
+                return None
+            if df is not None and not self._is_dual_slope_valid(df, curr, "SELL"):
+                return None
+            if df is not None and not self._linreg_slope_ok(df, "SELL"):
                 return None
 
+            entry = float(curr["close"])
+            atr_f = float(atr)
+            sl_lvl = self._override_sl_if_atr(entry, atr_f, "SELL")
+            if sl_lvl is None:
+                if self._use_swing_sl and df is not None:
+                    sl_lvl = self._calc_swing_sl(df, atr_f, "SELL")
+                if not self._use_swing_sl or df is None or sl_lvl is None or sl_lvl <= entry:
+                    sl_lvl = float(curr["high"]) + atr_f * rej_buf
+            # Opt-14: enforce minimum SL width
+            sl_lvl = self._enforce_min_sl(sl_lvl, entry, "SELL")
+
+            sl_distance = sl_lvl - entry
+            if sl_distance <= 0:
+                return None
+            if not self._sl_within_atr_cap(sl_distance, atr_f):
+                return None
             sl_pips = self._price_to_pips(sl_distance)
             if sl_pips <= 0:
                 return None
@@ -423,15 +648,130 @@ class SonicRStrategy(BaseStrategy):
                 logger.debug("SonicR Rejection SELL skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
                 return None
 
+            sl_src = "atr" if self._use_atr_sl else ("swing" if self._use_swing_sl else f"{rej_buf:.2f}×ATR")
             lim = float(pac_low) if self._limit_entry else 0.0
             return self._make_signal(
-                "SELL", curr["close"], sl_pips,
+                "SELL", entry, sl_pips,
                 f"PAC-Rejection SELL | pac_low={pac_low:.5f} ema89={ema89:.5f}"
-                f" sl={sl_pips:.0f}p buf={rej_buf:.2f}×ATR",
+                f" sl={sl_pips:.0f}p sl_src={sl_src}",
                 limit_price=lim,
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
+            )
+
+        return None
+
+    # ── Layer 1 Retest (Opt-3 when require_bo_confirmation) ──────────────────
+
+    def _check_pac_breakout_retest(
+        self,
+        df: pd.DataFrame,
+        curr: pd.Series,
+        prev: pd.Series,
+    ) -> Signal | None:
+        """
+        Retest entry: prev bar was a non-Marubozu breakout; curr retests PAC.
+          BUY : df[-3] ≤ pac_high, df[-2] > pac_high, curr low ≤ pac_high AND close > pac_high
+          SELL: df[-3] ≥ pac_low,  df[-2] < pac_low,  curr high ≥ pac_low  AND close < pac_low
+        """
+        if len(df) < 3:
+            return None
+
+        pre_prev = df.iloc[-3]
+        pac_high = float(curr["pac_high"])
+        pac_low  = float(curr["pac_low"])
+        ema200   = float(curr["ema200"])
+        atr      = float(curr["atr"])
+        entry    = float(curr["close"])
+
+        # BUY retest
+        if (
+            float(pre_prev["close"]) <= float(pre_prev.get("pac_high", pac_high))
+            and float(prev["close"])  > float(prev.get("pac_high", pac_high))
+            and float(curr["low"])    <= pac_high
+            and entry > pac_high
+            and entry > ema200
+        ):
+            if not self._is_dual_slope_valid(df, curr, "BUY"):
+                return None
+            if not self._linreg_slope_ok(df, "BUY"):
+                return None
+            if not self._is_volume_ok(curr, self._vol_ratio_bo):
+                return None
+            dist_ema200_pips = self._price_to_pips(abs(entry - ema200))
+            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
+                return None
+
+            sl_lvl = self._override_sl_if_atr(entry, atr, "BUY")
+            if sl_lvl is None:
+                sl_lvl = self._calc_swing_sl(df, atr, "BUY") if self._use_swing_sl else 0.0
+                if sl_lvl >= entry or sl_lvl == 0.0:
+                    sl_lvl = float(curr["pac_low"]) - atr * self._sl_buffer_atr
+            # Opt-14: enforce minimum SL width
+            sl_lvl = self._enforce_min_sl(sl_lvl, entry, "BUY")
+            sl_d = entry - sl_lvl
+            if sl_d <= 0 or not self._sl_within_atr_cap(sl_d, atr):
+                return None
+            sl_pips = self._price_to_pips(sl_d)
+            if sl_pips <= 0 or (self._max_sl_pips > 0 and sl_pips > self._max_sl_pips):
+                return None
+
+            lim = pac_high if self._limit_entry else 0.0
+            return self._make_signal(
+                "BUY", entry, sl_pips,
+                f"PAC-Breakout-Retest BUY | pac_high={pac_high:.5f} sl={sl_pips:.0f}p",
+                limit_price=lim, limit_expiry_bars=self._limit_expiry,
+                sl_level=sl_lvl, breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
+            )
+
+        # SELL retest
+        if (
+            float(pre_prev["close"]) >= float(pre_prev.get("pac_low", pac_low))
+            and float(prev["close"])  < float(prev.get("pac_low", pac_low))
+            and float(curr["high"])   >= pac_low
+            and entry < pac_low
+            and entry < ema200
+        ):
+            if not self._is_dual_slope_valid(df, curr, "SELL"):
+                return None
+            if not self._linreg_slope_ok(df, "SELL"):
+                return None
+            if not self._is_volume_ok(curr, self._vol_ratio_bo):
+                return None
+            dist_ema200_pips = self._price_to_pips(abs(entry - ema200))
+            if self._bo_max_ema200_dist_pips > 0 and dist_ema200_pips > self._bo_max_ema200_dist_pips:
+                return None
+
+            sl_lvl = self._override_sl_if_atr(entry, atr, "SELL")
+            if sl_lvl is None:
+                sl_lvl = self._calc_swing_sl(df, atr, "SELL") if self._use_swing_sl else 0.0
+                if sl_lvl <= entry or sl_lvl == 0.0:
+                    sl_lvl = float(curr["pac_high"]) + atr * self._sl_buffer_atr
+            # Opt-14: enforce minimum SL width
+            sl_lvl = self._enforce_min_sl(sl_lvl, entry, "SELL")
+            sl_d = sl_lvl - entry
+            if sl_d <= 0 or not self._sl_within_atr_cap(sl_d, atr):
+                return None
+            sl_pips = self._price_to_pips(sl_d)
+            if sl_pips <= 0 or (self._max_sl_pips > 0 and sl_pips > self._max_sl_pips):
+                return None
+
+            lim = pac_low if self._limit_entry else 0.0
+            return self._make_signal(
+                "SELL", entry, sl_pips,
+                f"PAC-Breakout-Retest SELL | pac_low={pac_low:.5f} sl={sl_pips:.0f}p",
+                limit_price=lim, limit_expiry_bars=self._limit_expiry,
+                sl_level=sl_lvl, breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         return None
@@ -456,6 +796,10 @@ class SonicRStrategy(BaseStrategy):
         if pac_mid <= ema89:
             return None
 
+        # Opt-6: EMA200 global trend filter
+        if not self._ema200_trend_ok(curr, "BUY"):
+            return None
+
         # EMA89 slope upward
         if not self._ema89_sloping_up(df):
             return None
@@ -472,11 +816,19 @@ class SonicRStrategy(BaseStrategy):
         if self._req_ema89_rej and curr["low"] <= ema89:
             return None
 
+        # Opt-1 + Opt-11
+        if not self._is_dual_slope_valid(df, curr, "BUY"):
+            return None
+        if not self._linreg_slope_ok(df, "BUY"):
+            return None
+
         n        = len(df)
         pb_start = max(0, n - self._pb_lookback)
         pb_window = df.iloc[pb_start:]
 
-        ema_touch = pb_window["low"] <= (pb_window["pac_mid"] + atr * 0.5)
+        # Opt-5: close-confirmation touch (no wick)
+        touch_col = "close" if self._use_close_for_ema_touch else "low"
+        ema_touch = pb_window[touch_col] <= (pb_window["pac_mid"] + atr * 0.5)
         if not ema_touch.any():
             return None
 
@@ -486,7 +838,7 @@ class SonicRStrategy(BaseStrategy):
 
         # Pullback reached EMA89 zone
         if self._req_ema89_touch:
-            touched = pullback_slice["low"] <= (
+            touched = pullback_slice[touch_col] <= (
                 pullback_slice["ema89"] + self._ema89_touch_atr * atr
             )
             if not touched.any():
@@ -512,13 +864,27 @@ class SonicRStrategy(BaseStrategy):
         if pullback_low < float(ext_slice["low"].min()) * 0.9990:
             return None
 
-        sl_lvl      = min(pullback_low, float(ema89)) - atr * self._sl_buffer_atr
-        sl_distance = curr["close"] - sl_lvl
+        entry = float(curr["close"])
+        atr_f = float(atr)
+
+        # Opt-4 ATR SL; Opt-2 Swing SL; fallback PAC SL
+        sl_lvl = self._override_sl_if_atr(entry, atr_f, "BUY")
+        if sl_lvl is None:
+            if self._use_swing_sl:
+                sl_lvl = self._calc_swing_sl(df, atr_f, "BUY")
+            if not self._use_swing_sl or sl_lvl is None or sl_lvl >= entry:
+                sl_lvl = min(pullback_low, float(ema89)) - atr_f * self._sl_buffer_atr
+        # Opt-14: enforce minimum SL width
+        sl_lvl = self._enforce_min_sl(sl_lvl, entry, "BUY")
+
+        sl_distance = entry - sl_lvl
         if sl_distance <= 0:
             return None
+        if not self._sl_within_atr_cap(sl_distance, atr_f):
+            return None
 
-        recent_high  = float(ext_slice["high"].max())
-        rr           = (recent_high - curr["close"]) / sl_distance if sl_distance > 0 else 0.0
+        recent_high = float(ext_slice["high"].max())
+        rr = (recent_high - entry) / sl_distance if sl_distance > 0 else 0.0
         if rr < self._min_rr:
             logger.debug("SonicR BUY skipped RR=%.2f < %.1f", rr, self._min_rr)
             return None
@@ -530,15 +896,19 @@ class SonicRStrategy(BaseStrategy):
             logger.debug("SonicR BUY★ skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
             return None
 
+        sl_src = "atr" if self._use_atr_sl else ("swing" if self._use_swing_sl else "pac")
         lim = float(pac_mid) if self._limit_entry else 0.0
         return self._make_signal(
-            "BUY", curr["close"], sl_pips,
+            "BUY", entry, sl_pips,
             f"SonicR BUY★ | pac_mid={pac_mid:.5f} ema89={ema89:.5f} "
-            f"PB_low={pullback_low:.5f} RR≈{rr:.1f} sl={sl_pips:.0f}p",
+            f"PB_low={pullback_low:.5f} RR≈{rr:.1f} sl={sl_pips:.0f}p sl_src={sl_src}",
             limit_price=lim,
             limit_expiry_bars=self._limit_expiry,
             sl_level=sl_lvl,
             breakeven_at_r=self._breakeven_at_r,
+            partial_close_at_r=self._partial_close_at_r,
+            partial_close_ratio=self._partial_close_ratio,
+            partial_trail_pips=self._partial_trail_pips,
         )
 
     # ── Layer 3a: Extension / Pullback SELL ──────────────────────────────────
@@ -561,6 +931,10 @@ class SonicRStrategy(BaseStrategy):
         if pac_mid >= ema89:
             return None
 
+        # Opt-6: EMA200 global trend filter
+        if not self._ema200_trend_ok(curr, "SELL"):
+            return None
+
         if not self._ema89_sloping_down(df):
             return None
 
@@ -573,11 +947,19 @@ class SonicRStrategy(BaseStrategy):
         if self._req_ema89_rej and curr["high"] >= ema89:
             return None
 
-        n          = len(df)
-        pb_start   = max(0, n - self._pb_lookback)
+        # Opt-1 + Opt-11
+        if not self._is_dual_slope_valid(df, curr, "SELL"):
+            return None
+        if not self._linreg_slope_ok(df, "SELL"):
+            return None
+
+        n           = len(df)
+        pb_start    = max(0, n - self._pb_lookback)
         corr_window = df.iloc[pb_start:]
 
-        ema_touch = corr_window["high"] >= (corr_window["pac_mid"] - atr * 0.5)
+        # Opt-5: close-confirmation touch (no wick)
+        touch_col = "close" if self._use_close_for_ema_touch else "high"
+        ema_touch = corr_window[touch_col] >= (corr_window["pac_mid"] - atr * 0.5)
         if not ema_touch.any():
             return None
 
@@ -586,7 +968,7 @@ class SonicRStrategy(BaseStrategy):
         correction_high  = float(correction_slice["high"].max())
 
         if self._req_ema89_touch:
-            touched = correction_slice["high"] >= (
+            touched = correction_slice[touch_col] >= (
                 correction_slice["ema89"] - self._ema89_touch_atr * atr
             )
             if not touched.any():
@@ -609,13 +991,26 @@ class SonicRStrategy(BaseStrategy):
         if correction_high > float(ext_slice["high"].max()) * 1.0010:
             return None
 
-        sl_lvl      = max(correction_high, float(ema89)) + atr * self._sl_buffer_atr
-        sl_distance = sl_lvl - curr["close"]
+        entry = float(curr["close"])
+        atr_f = float(atr)
+
+        sl_lvl = self._override_sl_if_atr(entry, atr_f, "SELL")
+        if sl_lvl is None:
+            if self._use_swing_sl:
+                sl_lvl = self._calc_swing_sl(df, atr_f, "SELL")
+            if not self._use_swing_sl or sl_lvl is None or sl_lvl <= entry:
+                sl_lvl = max(correction_high, float(ema89)) + atr_f * self._sl_buffer_atr
+        # Opt-14: enforce minimum SL width
+        sl_lvl = self._enforce_min_sl(sl_lvl, entry, "SELL")
+
+        sl_distance = sl_lvl - entry
         if sl_distance <= 0:
             return None
+        if not self._sl_within_atr_cap(sl_distance, atr_f):
+            return None
 
-        recent_low  = float(ext_slice["low"].min())
-        rr          = (curr["close"] - recent_low) / sl_distance if sl_distance > 0 else 0.0
+        recent_low = float(ext_slice["low"].min())
+        rr = (entry - recent_low) / sl_distance if sl_distance > 0 else 0.0
         if rr < self._min_rr:
             logger.debug("SonicR SELL skipped RR=%.2f < %.1f", rr, self._min_rr)
             return None
@@ -627,15 +1022,19 @@ class SonicRStrategy(BaseStrategy):
             logger.debug("SonicR SELL★ skipped: sl_pips=%.0f > max=%.0f", sl_pips, self._max_sl_pips)
             return None
 
+        sl_src = "atr" if self._use_atr_sl else ("swing" if self._use_swing_sl else "pac")
         lim = float(pac_mid) if self._limit_entry else 0.0
         return self._make_signal(
-            "SELL", curr["close"], sl_pips,
+            "SELL", entry, sl_pips,
             f"SonicR SELL★ | pac_mid={pac_mid:.5f} ema89={ema89:.5f} "
-            f"COR_high={correction_high:.5f} RR≈{rr:.1f} sl={sl_pips:.0f}p",
+            f"COR_high={correction_high:.5f} RR≈{rr:.1f} sl={sl_pips:.0f}p sl_src={sl_src}",
             limit_price=lim,
             limit_expiry_bars=self._limit_expiry,
             sl_level=sl_lvl,
             breakeven_at_r=self._breakeven_at_r,
+            partial_close_at_r=self._partial_close_at_r,
+            partial_close_ratio=self._partial_close_ratio,
+            partial_trail_pips=self._partial_trail_pips,
         )
 
     # ── Layer 3b: SW Oscillation ──────────────────────────────────────────────
@@ -669,15 +1068,21 @@ class SonicRStrategy(BaseStrategy):
 
         # BUY: bounce upward through pac_mid
         if curr["close"] > pac_mid and prev["close"] <= pac_mid:
+            if not self._ema200_trend_ok(curr, "BUY"):
+                return None
             if self._req_strong_candle and not self._is_strong_candle(curr, "BUY"):
                 return None
 
-            sl_lvl      = range_low - atr * self._sl_buffer_atr
-            sl_distance = curr["close"] - sl_lvl
+            sl_lvl      = range_low - float(atr) * self._sl_buffer_atr
+            # Opt-14: enforce minimum SL width
+            sl_lvl      = self._enforce_min_sl(sl_lvl, float(curr["close"]), "BUY")
+            sl_distance = float(curr["close"]) - sl_lvl
             if sl_distance <= 0:
                 return None
+            if not self._sl_within_atr_cap(sl_distance, float(atr)):
+                return None
 
-            tp_distance = range_high - curr["close"]
+            tp_distance = range_high - float(curr["close"])
             rr          = tp_distance / sl_distance if sl_distance > 0 else 0.0
             if rr < self._min_rr:
                 return None
@@ -688,26 +1093,35 @@ class SonicRStrategy(BaseStrategy):
 
             lim = float(pac_mid) if self._limit_entry else 0.0
             return self._make_signal(
-                "BUY", curr["close"], sl_pips,
+                "BUY", float(curr["close"]), sl_pips,
                 f"SonicR SW-BUY | pac_mid={pac_mid:.5f} "
                 f"Range=[{range_low:.5f}–{range_high:.5f}] RR≈{rr:.1f}",
                 limit_price=lim,
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         # SELL: rejection downward through pac_mid
         if curr["close"] < pac_mid and prev["close"] >= pac_mid:
+            if not self._ema200_trend_ok(curr, "SELL"):
+                return None
             if self._req_strong_candle and not self._is_strong_candle(curr, "SELL"):
                 return None
 
-            sl_lvl      = range_high + atr * self._sl_buffer_atr
-            sl_distance = sl_lvl - curr["close"]
+            sl_lvl      = range_high + float(atr) * self._sl_buffer_atr
+            # Opt-14: enforce minimum SL width
+            sl_lvl      = self._enforce_min_sl(sl_lvl, float(curr["close"]), "SELL")
+            sl_distance = sl_lvl - float(curr["close"])
             if sl_distance <= 0:
                 return None
+            if not self._sl_within_atr_cap(sl_distance, float(atr)):
+                return None
 
-            tp_distance = curr["close"] - range_low
+            tp_distance = float(curr["close"]) - range_low
             rr          = tp_distance / sl_distance if sl_distance > 0 else 0.0
             if rr < self._min_rr:
                 return None
@@ -718,13 +1132,16 @@ class SonicRStrategy(BaseStrategy):
 
             lim = float(pac_mid) if self._limit_entry else 0.0
             return self._make_signal(
-                "SELL", curr["close"], sl_pips,
+                "SELL", float(curr["close"]), sl_pips,
                 f"SonicR SW-SELL | pac_mid={pac_mid:.5f} "
                 f"Range=[{range_low:.5f}–{range_high:.5f}] RR≈{rr:.1f}",
                 limit_price=lim,
                 limit_expiry_bars=self._limit_expiry,
                 sl_level=sl_lvl,
                 breakeven_at_r=self._breakeven_at_r,
+                partial_close_at_r=self._partial_close_at_r,
+                partial_close_ratio=self._partial_close_ratio,
+                partial_trail_pips=self._partial_trail_pips,
             )
 
         return None
@@ -785,6 +1202,261 @@ class SonicRStrategy(BaseStrategy):
         )
         return is_dir and (body >= range_ * self._strong_ratio)
 
+    # ── Opt-1: Dual Slope ─────────────────────────────────────────────────────
+
+    def _is_dual_slope_valid(
+        self, df: pd.DataFrame, curr: pd.Series, direction: str
+    ) -> bool:
+        """
+        Kiểm tra EMA34 và EMA89 đều có độ dốc rõ ràng theo hướng tín hiệu.
+        slope_pips_per_bar = (ema_now − ema_N_ago) / N / pip_size
+        """
+        if not self._require_ema_slope:
+            return True
+        n = self._slope_lookback
+        if len(df) < n + 2:
+            return True
+        prev_n   = df.iloc[-(n + 1)]
+        slope34  = (float(curr["pac_mid"]) - float(prev_n["pac_mid"])) / n
+        slope89  = (float(curr["ema89"])   - float(prev_n["ema89"]))   / n
+        pip_size = self._pip_size()
+        s34p     = slope34 / pip_size
+        s89p     = slope89 / pip_size
+        thresh   = self._min_slope_pips_per_bar
+        if direction == "BUY":
+            ok = s34p > thresh and s89p > thresh
+        else:
+            ok = s34p < -thresh and s89p < -thresh
+        if not ok:
+            logger.debug(
+                "SonicR slope %s: EMA34=%.2f EMA89=%.2f pips/bar (need %s%.2f)",
+                direction, s34p, s89p,
+                ">" if direction == "BUY" else "<",
+                thresh if direction == "BUY" else -thresh,
+            )
+        return ok
+
+    # ── Opt-2: Swing SL ───────────────────────────────────────────────────────
+
+    def _calc_swing_sl(
+        self, df: pd.DataFrame, atr: float, direction: str
+    ) -> float:
+        """SL = Swing Low/High (lookback bars) ± swing_sl_atr_mult × ATR."""
+        lb = self._swing_sl_lookback
+        if len(df) < lb + 2:
+            return 0.0
+        window = df.iloc[-(lb + 1):-1]
+        buf    = float(atr) * self._swing_sl_atr_mult
+        return float(window["low"].min()) - buf if direction == "BUY" \
+            else float(window["high"].max()) + buf
+
+    # ── Opt-3: Marubozu ───────────────────────────────────────────────────────
+
+    def _is_marubozu(self, bar: pd.Series, direction: str) -> bool:
+        """Thân nến ≥ bo_marubozu_ratio × full range, đúng chiều."""
+        full_range = float(bar["high"]) - float(bar["low"])
+        if full_range <= 0:
+            return False
+        body   = abs(float(bar["close"]) - float(bar["open"]))
+        is_dir = (
+            (direction == "BUY"  and bar["close"] > bar["open"]) or
+            (direction == "SELL" and bar["close"] < bar["open"])
+        )
+        return is_dir and body >= self._bo_marubozu_ratio * full_range
+
+    # ── Opt-4: ATR SL override ────────────────────────────────────────────────
+
+    def _override_sl_if_atr(
+        self, entry: float, atr: float, direction: str
+    ) -> float | None:
+        """
+        Khi use_atr_sl=True: SL = entry ± atr_sl_mult × ATR.
+        None = tắt (caller dùng SL tính sẵn).
+        """
+        if not self._use_atr_sl:
+            return None
+        buf = float(atr) * self._atr_sl_mult
+        return entry - buf if direction == "BUY" else entry + buf
+
+    # ── Opt-6: EMA200 global trend filter ────────────────────────────────────
+
+    def _ema200_trend_ok(self, curr: pd.Series, direction: str) -> bool:
+        """BUY chỉ khi close > EMA200; SELL ngược lại. Tắt khi require_ema200_trend=False."""
+        if not self._require_ema200_trend:
+            return True
+        ema200 = float(curr.get("ema200", curr["close"]))
+        ok = curr["close"] > ema200 if direction == "BUY" else curr["close"] < ema200
+        if not ok:
+            logger.debug(
+                "SonicR %s filtered: close=%.5f %s EMA200=%.5f",
+                direction, float(curr["close"]),
+                "not >" if direction == "BUY" else "not <",
+                ema200,
+            )
+        return ok
+
+    # ── Opt-7: Max SL cap relative to ATR ────────────────────────────────────
+
+    def _sl_within_atr_cap(self, sl_distance: float, atr: float) -> bool:
+        """Trả về False (bỏ lệnh) nếu SL > max_sl_atr_mult × ATR. 0 = tắt."""
+        if self._max_sl_atr_mult <= 0:
+            return True
+        cap = float(atr) * self._max_sl_atr_mult
+        ok = sl_distance <= cap
+        if not ok:
+            logger.debug(
+                "SonicR SL=%.5f > cap=%.5f (%.1f×ATR) → skipped",
+                sl_distance, cap, self._max_sl_atr_mult,
+            )
+        return ok
+
+    # ── Opt-13: Absolute EMA Gap Filter ──────────────────────────────────────
+
+    def _ema_gap_ok(self, curr: pd.Series) -> bool:
+        """
+        Kiểm tra khoảng cách tuyệt đối giữa EMA34 (pac_mid) và EMA89.
+        Nếu gap < min_ema_gap_pips → EMA đi sát nhau → sideway → skip.
+        0 = tắt.
+        """
+        if self._min_ema_gap_pips <= 0:
+            return True
+        gap_pips = self._price_to_pips(
+            abs(float(curr["pac_mid"]) - float(curr["ema89"]))
+        )
+        ok = gap_pips >= self._min_ema_gap_pips
+        if not ok:
+            logger.debug(
+                "SonicR EMA gap %.1f pips < min %.1f → sideway skip",
+                gap_pips, self._min_ema_gap_pips,
+            )
+        return ok
+
+    # ── Opt-14: Minimum SL Width ───────────────────────────────────────────────
+
+    def _enforce_min_sl(self, sl_lvl: float, entry: float, direction: str) -> float:
+        """
+        Đảm bảo SL rộng ít nhất min_sl_pips. Nếu SL tính được hẹp hơn, kéo
+        sl_lvl ra xa entry đến đúng min_sl_pips.
+        • BUY : sl_lvl = min(sl_lvl, entry − min_sl_pips × pip_size)
+        • SELL: sl_lvl = max(sl_lvl, entry + min_sl_pips × pip_size)
+        0 = tắt.
+        """
+        if self._min_sl_pips <= 0:
+            return sl_lvl
+        min_dist = self._min_sl_pips * self._pip_size()
+        if direction == "BUY":
+            return min(sl_lvl, entry - min_dist)
+        else:
+            return max(sl_lvl, entry + min_dist)
+
+    # ── Opt-9: Time / Session Filter ─────────────────────────────────────────
+
+    def _is_trade_hour_ok(self, curr: pd.Series) -> bool:
+        """
+        Kiểm tra giờ UTC của nến hiện tại có nằm trong allowed_hours_utc không.
+        Set rỗng = cho phép mọi giờ.
+        """
+        if not self._allowed_hours_utc:
+            return True
+        try:
+            ts_raw = curr.get("timestamp", curr.name)
+            ts = pd.Timestamp(ts_raw)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            ok = ts.hour in self._allowed_hours_utc
+            if not ok:
+                logger.debug("SonicR time filter: hour %d not in allowed set", ts.hour)
+            return ok
+        except Exception:
+            return True  # graceful fallback nếu timestamp không parse được
+
+    # ── Opt-10: ADX Filter ───────────────────────────────────────────────────
+
+    def _adx_ok(self, curr: pd.Series) -> bool:
+        """Chỉ vào lệnh khi ADX ≥ adx_filter_min. 0 = tắt."""
+        if self._adx_filter_min <= 0:
+            return True
+        adx = float(curr.get("adx", float("nan")))
+        if pd.isna(adx) or adx <= 0:
+            return True  # không có dữ liệu → không chặn
+        ok = adx >= self._adx_filter_min
+        if not ok:
+            logger.debug("SonicR ADX=%.1f < min=%.1f → skip", adx, self._adx_filter_min)
+        return ok
+
+    # ── Opt-11: Linear Regression Slope Filter ────────────────────────────────
+
+    def _linreg_slope_ok(self, df: pd.DataFrame, direction: str) -> bool:
+        """
+        Tính hồi quy tuyến tính trên EMA89 trong linreg_slope_lookback nến gần nhất.
+        Nếu |slope| < linreg_slope_thresh (pips/bar) → EMA đi ngang → bỏ qua.
+        BUY: slope phải > +thresh; SELL: slope phải < -thresh.
+        """
+        if not self._use_linreg_slope:
+            return True
+        n = self._linreg_slope_lookback
+        if len(df) < n + 2:
+            return True
+        ema89_vals = df["ema89"].iloc[-n:].values.astype(float)
+        try:
+            x = np.arange(len(ema89_vals), dtype=float)
+            slope_price = float(np.polyfit(x, ema89_vals, 1)[0])
+            slope_pips = slope_price / self._pip_size()
+            ok = (slope_pips > self._linreg_slope_thresh) if direction == "BUY" \
+                else (slope_pips < -self._linreg_slope_thresh)
+            if not ok:
+                logger.debug(
+                    "SonicR linreg EMA89 slope %.3f pips/bar not %s %.3f → skip",
+                    slope_pips,
+                    f"> {self._linreg_slope_thresh:.3f}" if direction == "BUY"
+                    else f"< -{self._linreg_slope_thresh:.3f}",
+                    self._linreg_slope_thresh,
+                )
+            return ok
+        except Exception:
+            return True
+
+    # ── Opt-12: Dragon Tunnel Zigzag Filter ──────────────────────────────────
+
+    def _dragon_no_zigzag(self, df: pd.DataFrame) -> bool:
+        """
+        Đếm số lần giá đổi vùng qua dải Dragon (pac_high / pac_low):
+          +1 = close > pac_high (trên dải)
+          -1 = close < pac_low  (dưới dải)
+           0 = trong dải (bị bỏ qua khi đếm)
+
+        Nếu số lần chuyển vùng (±1→∓1) ≥ dragon_zigzag_max_crosses → sideway → skip.
+        """
+        if not self._dragon_zigzag_filter:
+            return True
+        n = self._dragon_zigzag_lookback
+        if len(df) < n + 2:
+            return True
+        window = df.iloc[-(n + 1):]
+
+        def _zone(row: pd.Series) -> int:
+            if float(row["close"]) > float(row["pac_high"]):
+                return 1
+            if float(row["close"]) < float(row["pac_low"]):
+                return -1
+            return 0
+
+        zones = window.apply(_zone, axis=1)
+        non_zero = zones[zones != 0]
+        if len(non_zero) < 2:
+            return True  # giá ở trong dải suốt → không đủ dữ liệu để phán định
+        # Mỗi lần giá đổi từ +1 sang -1 (hoặc ngược lại) = 1 lần zig-zag
+        transitions = int((non_zero != non_zero.shift()).sum()) - 1
+        ok = transitions < self._dragon_zigzag_max_crosses
+        if not ok:
+            logger.debug(
+                "SonicR Dragon zigzag: %d zone-switches in %d bars ≥ %d → sideway skip",
+                transitions, n, self._dragon_zigzag_max_crosses,
+            )
+        return ok
+
     def _is_sideways_no_dow(self, window: pd.DataFrame, atr: float) -> bool:
         """
         True when:
@@ -817,15 +1489,18 @@ class SonicRStrategy(BaseStrategy):
 
     # ── Pip conversion ────────────────────────────────────────────────────────
 
+    def _pip_size(self) -> float:
+        sym = self.symbol.upper()
+        if sym in ("XAUUSD", "XAGUSD"):
+            return 0.10
+        if "JPY" in sym:
+            return 0.01
+        return 0.0001
+
     def _price_to_pips(self, distance: float) -> float:
         """
         XAUUSD/XAGUSD : 1 pip = $0.10  (1 USD move = 10 pips)
         JPY pairs     : 1 pip = 0.01
         Standard Forex: 1 pip = 0.0001
         """
-        sym = self.symbol.upper()
-        if sym in ("XAUUSD", "XAGUSD"):
-            return distance / 0.10
-        if "JPY" in sym:
-            return distance / 0.01
-        return distance / 0.0001
+        return distance / self._pip_size()

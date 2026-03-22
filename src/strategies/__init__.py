@@ -3,6 +3,8 @@ from .macd_crossover import MACDCrossoverStrategy
 from .rsi_ema import RSI_EMA_Strategy
 from .sonicr import SonicRStrategy
 from .sonicr_fund import SonicRFundStrategy
+from .sonicr_m15 import SonicRM15Strategy
+from .sonicr_m5 import SonicRM5Strategy
 from .hidden_divergence import HiddenDivergenceStrategy
 
 __all__ = [
@@ -12,5 +14,7 @@ __all__ = [
     "RSI_EMA_Strategy",
     "SonicRStrategy",
     "SonicRFundStrategy",
+    "SonicRM15Strategy",
+    "SonicRM5Strategy",
     "HiddenDivergenceStrategy",
 ]

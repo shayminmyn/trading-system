@@ -151,6 +151,28 @@ strategies:
     breakeven_at_r: 0.0
     # (5) Ưu tiên Rejection (SL ngắn hơn, RR tốt hơn): true = Rejection TRƯỚC Breakout
     rejection_priority: false
+    # ── Opt-13: Absolute EMA Gap Filter ─────────────────────────────────────────────
+    # Khoảng cách tuyệt đối (pips) giữa EMA34 và EMA89; 0 = tắt
+    min_ema_gap_pips: 0.0
+    # ── Opt-14: Minimum SL Width ─────────────────────────────────────────────────────
+    # SL tối thiểu pips; 0 = tắt; 150 pips cho M5 XAUUSD
+    min_sl_pips: 0.0
+    # ── Bộ lọc tối ưu v3 ────────────────────────────────────────────────────────
+    # Opt-1: EMA Dual Slope Filter
+    require_ema_slope: false        # true = bật; chỉ vào lệnh khi EMA34+EMA89 đang dốc
+    min_slope_pips_per_bar: 0.5     # ngưỡng XAUUSD H1 (~30°); giảm xuống nếu lọc quá nhiều
+    # Opt-2: Swing-based ATR SL (SL = Swing + N×ATR)
+    use_swing_sl: false             # true = bật; false = dùng PAC band như cũ
+    swing_sl_lookback: 10           # số nến nhìn lại để tìm swing high/low
+    swing_sl_atr_mult: 1.5          # khoảng đệm (1.5 = vàng cần "thở")
+    # Opt-3: Three-Bar Confirmation (Marubozu ngay | đợi retest)
+    require_bo_confirmation: false  # true = bật; false = vào theo logic breakout gốc
+    bo_marubozu_ratio: 0.8          # thân ≥ 80% range → chấp nhận vào ngay (Marubozu)
+    # Opt-4: ATR-based SL (SL = Entry ± N×ATR) — ghi đè PAC/Swing SL
+    use_atr_sl: false               # true = SL = Entry ± atr_sl_mult × ATR; false = PAC/Swing
+    atr_sl_mult: 1.5                # hệ số N; 1.5 phù hợp M15, 2.0 cho H1 nếu muốn rộng hơn
+    # Opt-5: Close-confirmation touch — không vào lệnh chỉ vì wick chạm EMA
+    use_close_for_ema_touch: false  # true = dùng close; false = dùng low/high (wick) như cũ
 
   # SonicRFund = SonicR + bộ lọc v3 đầy đủ (PAC Fanning, Partial Close, Candle Confirm, ATR-EMA200)
   SonicRFund:
@@ -197,6 +219,85 @@ strategies:
     partial_close_at_r: 0.0            # 1.0 = chốt 50% tại +1R
     partial_close_ratio: 0.5
     partial_trail_pips: 5.0
+
+  SonicRM15:
+    # ── SonicR M15 — ba tối ưu bật sẵn ────────────────────────────────────────
+    # Opt-1 EMA Slope, Opt-4 ATR SL, Opt-5 Close-confirmation touch.
+    # Các tham số này ghi đè _M15_DEFAULTS trong SonicRM15Strategy.__init__.
+
+    # ── Opt-1: EMA Slope ──────────────────────────────────────────────────────
+    require_ema_slope: true
+    min_slope_pips_per_bar: 0.2        # 0.2 pips/bar ≈ 30° trên M15 XAUUSD
+    slope_lookback: 10                 # 10 nến M15 ≈ 2.5 h
+
+    # ── Opt-4: ATR SL ─────────────────────────────────────────────────────────
+    use_atr_sl: true
+    atr_sl_mult: 1.5                   # SL = Entry ± 1.5 × ATR_M15
+
+    # ── Opt-5: Close-confirmation touch ───────────────────────────────────────
+    use_close_for_ema_touch: true      # không vào lệnh chỉ vì wick chạm EMA
+
+    # ── Entry ─────────────────────────────────────────────────────────────────
+    limit_entry: false                 # market order sau khi close xác nhận
+
+    # ── Lookback ──────────────────────────────────────────────────────────────
+    pullback_lookback: 60
+    extension_lookback: 40
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+    rejection_priority: true
+    enable_sw_signal: false
+    max_sl_pips: 0
+    breakeven_at_r: 1.0
+    min_rr: 1.5
+
+  SonicRM5:
+    # ── SonicR M5 — bốn tối ưu bật sẵn ────────────────────────────────────────
+    # Opt-1 EMA Slope, Opt-3 Marubozu BO confirmation, Opt-4 ATR SL, Opt-5 Close-touch.
+    # Các tham số này ghi đè _M5_DEFAULTS trong SonicRM5Strategy.__init__.
+
+    # ── Opt-1: EMA Slope ──────────────────────────────────────────────────────
+    require_ema_slope: true
+    min_slope_pips_per_bar: 0.1        # 0.1 pips/bar cho M5 XAUUSD
+    slope_lookback: 30                 # 30 nến M5 ≈ 2.5 h
+
+    # ── Opt-3: Marubozu Confirmation (PAC Breakout) ───────────────────────────
+    require_bo_confirmation: true      # M5 fakeout rất nhiều → bắt buộc xác nhận
+    bo_marubozu_ratio: 0.75            # thân ≥ 75% range → coi là Marubozu
+
+    # ── Opt-4: ATR SL ─────────────────────────────────────────────────────────
+    use_atr_sl: true
+    atr_sl_mult: 1.5                   # SL = Entry ± 1.5 × ATR_M5
+
+    # ── Opt-5: Close-confirmation touch ───────────────────────────────────────
+    use_close_for_ema_touch: true      # không vào lệnh chỉ vì wick chạm EMA
+
+    # ── Opt-11: LinReg Slope (~20°) ───────────────────────────────────────────
+    use_linreg_slope: true
+    linreg_slope_lookback: 20          # 20 nến M5 ≈ 1.7 h
+    linreg_slope_thresh: 0.3           # 0.3 pips/bar ≈ 20° trên XAUUSD M5
+
+    # ── Opt-13: Absolute EMA Gap Filter ───────────────────────────────────────
+    # Khoảng cách EMA34–EMA89 phải > 50 pips — tránh sideway hoàn toàn
+    min_ema_gap_pips: 50.0
+
+    # ── Opt-14: Minimum SL Width ──────────────────────────────────────────────
+    # SL tối thiểu 150 pips — đủ "thở" cho XAUUSD M5
+    min_sl_pips: 150.0
+
+    # ── Entry ─────────────────────────────────────────────────────────────────
+    limit_entry: false                 # market order sau khi close xác nhận
+
+    # ── Lookback (×12 vs H1, ×3 vs M15) ──────────────────────────────────────
+    pullback_lookback: 120             # 120 M5 ≈ 10 h
+    extension_lookback: 60             # 60 M5 ≈ 5 h
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+    rejection_priority: true
+    enable_sw_signal: false            # tắt — M5 quá nhiều noise sideways
+    max_sl_pips: 0
+    breakeven_at_r: 1.0                # dời SL về entry khi đạt +1R
+    min_rr: 1.5
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:
