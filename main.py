@@ -41,7 +41,23 @@ _STRATEGY_REGISTRY = {
 
 
 def build_strategies(config: dict) -> dict[tuple[str, str], list]:
-    """Instantiate all configured strategies per (symbol, timeframe)."""
+    """
+    Instantiate all configured strategies per (symbol, timeframe).
+
+    Per-strategy timeframe restriction: if a strategy's config contains an
+    ``allowed_timeframes`` list, the strategy is only created for timeframes
+    that appear in that list.  An empty / missing list means "all timeframes".
+
+    Example config.yaml::
+
+        strategies:
+          SonicR:
+            allowed_timeframes: ["H1", "H4"]
+          SonicRM15:
+            allowed_timeframes: ["M15"]
+          SonicRM5:
+            allowed_timeframes: ["M5"]
+    """
     strategies: dict[tuple[str, str], list] = {}
     strategy_params = config.get("strategies", {})
     session_filters = config.get("session_filters", {})
@@ -57,6 +73,27 @@ def build_strategies(config: dict) -> dict[tuple[str, str], list]:
                     logger.warning("Unknown strategy: %s — skipping", strat_name)
                     continue
                 params = dict(strategy_params.get(strat_name, {}))
+
+                # Respect per-strategy timeframe / symbol whitelists (pop so
+                # they are not forwarded to the strategy constructor).
+                allowed_tfs: list = params.pop("allowed_timeframes", [])
+                if allowed_tfs and tf not in allowed_tfs:
+                    logger.debug(
+                        "Strategy %s skipped for %s/%s "
+                        "(allowed_timeframes=%s)",
+                        strat_name, symbol, tf, allowed_tfs,
+                    )
+                    continue
+
+                allowed_syms: list = params.pop("allowed_symbols", [])
+                if allowed_syms and symbol not in allowed_syms:
+                    logger.debug(
+                        "Strategy %s skipped for %s/%s "
+                        "(allowed_symbols=%s)",
+                        strat_name, symbol, tf, allowed_syms,
+                    )
+                    continue
+
                 params["session_filters"] = session_filters
                 strategies[key].append(cls(symbol=symbol, timeframe=tf, parameters=params))
                 logger.info("Loaded strategy: %s for %s/%s", strat_name, symbol, tf)
