@@ -116,6 +116,8 @@ strategies:
     rsi_oversold: 30
 
   SonicR:
+    allowed_timeframes: ["H1", "H4"]   # chỉ chạy trên H1/H4; [] = mọi TF
+    allowed_symbols: ["XAUUSD", "EURUSD", "GBPUSD"]   # [] = mọi symbol
     ema_fast: 34                    # EMA cluster ngắn hạn
     ema_slow: 89                    # EMA cluster dài hạn (xu hướng chính)
     atr_period: 14
@@ -176,6 +178,8 @@ strategies:
 
   # SonicRFund = SonicR + bộ lọc v3 đầy đủ (PAC Fanning, Partial Close, Candle Confirm, ATR-EMA200)
   SonicRFund:
+    allowed_timeframes: ["H1", "H4"]   # chỉ chạy trên H1/H4
+    allowed_symbols: ["XAUUSD"]
     ema_fast: 34
     ema_slow: 89
     ema_trend: 200
@@ -221,6 +225,8 @@ strategies:
     partial_trail_pips: 5.0
 
   SonicRM15:
+    allowed_timeframes: ["M15"]        # chỉ chạy trên M15
+    allowed_symbols: ["XAUUSD"]
     # ── SonicR M15 — ba tối ưu bật sẵn ────────────────────────────────────────
     # Opt-1 EMA Slope, Opt-4 ATR SL, Opt-5 Close-confirmation touch.
     # Các tham số này ghi đè _M15_DEFAULTS trong SonicRM15Strategy.__init__.
@@ -252,6 +258,8 @@ strategies:
     min_rr: 1.5
 
   SonicRM5:
+    allowed_timeframes: ["M5"]         # chỉ chạy trên M5
+    allowed_symbols: ["XAUUSD"]
     # ── SonicR M5 — bốn tối ưu bật sẵn ────────────────────────────────────────
     # Opt-1 EMA Slope, Opt-3 Marubozu BO confirmation, Opt-4 ATR SL, Opt-5 Close-touch.
     # Các tham số này ghi đè _M5_DEFAULTS trong SonicRM5Strategy.__init__.
