@@ -87,6 +87,7 @@ class ReportGenerator:
             "losing_trades": result.losing_trades,
             "avg_win_pips": result.avg_win_pips,
             "avg_loss_pips": result.avg_loss_pips,
+            "strategy_config": result.strategy_config,
             "trades": result.trades,
         }
         path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
@@ -141,6 +142,50 @@ class ReportGenerator:
         )
         fig.write_html(str(path))
         return str(path)
+
+    @staticmethod
+    def _build_config_html(cfg: dict) -> str:
+        """
+        Render the strategy_config dict as a collapsible HTML panel.
+        Boolean flags, numeric params and lists are colour-coded.
+        """
+        if not cfg:
+            return ""
+
+        def _val_html(v) -> str:
+            if isinstance(v, bool):
+                color = "#6abf69" if v else "#ff6b6b"
+                return f"<span style='color:{color};font-weight:bold'>{'true' if v else 'false'}</span>"
+            if isinstance(v, (int, float)):
+                return f"<span style='color:#a8c7ff'>{v}</span>"
+            if isinstance(v, list):
+                inner = ", ".join(str(x) for x in v)
+                return f"<span style='color:#ffd580'>[{inner}]</span>"
+            return f"<span style='color:#e0e0e0'>{html.escape(str(v))}</span>"
+
+        rows = "".join(
+            f"<tr>"
+            f"<td style='color:#9fb8d0;padding:4px 12px;font-family:monospace;white-space:nowrap'>{html.escape(str(k))}</td>"
+            f"<td style='padding:4px 12px;font-family:monospace'>{_val_html(v)}</td>"
+            f"</tr>"
+            for k, v in sorted(cfg.items())
+        )
+        return f"""
+<details style='margin:16px 0;background:#1a1d2e;border-radius:8px;padding:2px 16px'>
+  <summary style='cursor:pointer;padding:10px 0;color:#8ab4f8;font-size:0.92em;
+                   font-weight:bold;letter-spacing:0.4px;user-select:none'>
+    ⚙ Strategy Config ({len(cfg)} parameters) — click to expand
+  </summary>
+  <div style='overflow-x:auto;padding-bottom:12px'>
+    <table style='width:auto;font-size:0.82em;border-collapse:collapse;margin-top:6px'>
+      <tr>
+        <th style='background:#0f1117;padding:4px 12px;color:#666;font-size:0.78em;text-align:left'>Parameter</th>
+        <th style='background:#0f1117;padding:4px 12px;color:#666;font-size:0.78em;text-align:left'>Value</th>
+      </tr>
+      {rows}
+    </table>
+  </div>
+</details>"""
 
     @staticmethod
     def _fmt_price(price: float, symbol: str) -> str:
@@ -279,6 +324,7 @@ class ReportGenerator:
   <div class="card"><div class="val" style="color:#ff4b4b">-${abs(total_loss):,.2f}</div><div class="lbl">Gross Loss</div></div>
 </div>
 
+{self._build_config_html(r.strategy_config)}
 <h3>Trade Log <span style="font-size:0.75em; color:#888; font-weight:normal">🕐 UTC+7 (Giờ Việt Nam)</span></h3>
 <p class="legend">
   <span style="color:#ff4b4b">■</span> SL &nbsp;|&nbsp;

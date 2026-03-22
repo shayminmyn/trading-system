@@ -55,6 +55,8 @@ class BacktestResult:
     avg_loss_pips: float
     equity_curve: list[float] = field(default_factory=list, repr=False)
     trades: list[dict] = field(default_factory=list, repr=False)
+    # Full strategy parameter snapshot at backtest time (for reproducibility)
+    strategy_config: dict = field(default_factory=dict, repr=False)
 
     def summary(self) -> str:
         active  = [t for t in self.trades if t.get("result") != "EXPIRED"]
@@ -119,6 +121,47 @@ class BacktestResult:
                if active else "")
             + f"{'═'*70}"
         )
+
+
+def _safe_config_snapshot(strategy: "BaseStrategy") -> dict:
+    """
+    Extract a clean, JSON-serialisable copy of the strategy's active parameters.
+
+    Priority:
+      1. strategy.parameters  — the raw dict passed to __init__ (highest fidelity)
+      2. Fallback: scan public / _-prefixed instance attributes that hold
+         primitive values (bool, int, float, str, list, set → list).
+
+    Keys from internal bookkeeping (_min_bars, etc.) that are not tunable
+    config values are stripped.
+    """
+    _SKIP = frozenset({"_min_bars", "symbol", "timeframe", "name", "parameters"})
+
+    # Path 1: strategy always stores the merged dict in self.parameters
+    raw: dict = {}
+    if hasattr(strategy, "parameters") and isinstance(strategy.parameters, dict):
+        raw = dict(strategy.parameters)
+
+    # Path 2: reflect private attributes that look like config knobs
+    if not raw:
+        for attr, val in vars(strategy).items():
+            if attr in _SKIP:
+                continue
+            if isinstance(val, (bool, int, float, str)):
+                raw[attr.lstrip("_")] = val
+            elif isinstance(val, (list, set)):
+                raw[attr.lstrip("_")] = sorted(val) if isinstance(val, set) else list(val)
+
+    # Ensure JSON-serialisability: convert sets → sorted lists, drop un-serialisable
+    clean: dict = {}
+    for k, v in sorted(raw.items()):
+        if isinstance(v, set):
+            clean[k] = sorted(v)
+        elif isinstance(v, (bool, int, float, str, list, type(None))):
+            clean[k] = v
+        else:
+            clean[k] = str(v)
+    return clean
 
 
 class BacktestEngine:
@@ -774,6 +817,8 @@ class BacktestEngine:
         strategy: "BaseStrategy",
         df: pd.DataFrame,
     ) -> BacktestResult:
+        cfg_snapshot = _safe_config_snapshot(strategy)
+
         if not trades:
             ic = self._initial_capital
             return BacktestResult(
@@ -796,6 +841,7 @@ class BacktestEngine:
                 avg_win_pips=0.0,
                 avg_loss_pips=0.0,
                 trades=[],
+                strategy_config=cfg_snapshot,
             )
 
         # Actual pip value per lot (used for real P&L calculation)
@@ -870,4 +916,5 @@ class BacktestEngine:
             avg_loss_pips=round(np.mean(loss_pips), 1) if loss_pips else 0.0,
             equity_curve=equity_curve,
             trades=active_trades + expired_trades,  # expired last for HTML log
+            strategy_config=cfg_snapshot,
         )
