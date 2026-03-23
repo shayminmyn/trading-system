@@ -34,7 +34,8 @@ logger = get_logger("risk_manager")
 
 # Default pip values per lot for common symbols (USD account)
 _DEFAULT_PIP_VALUE: dict[str, float] = {
-    "XAUUSD": 10.0,    # 1 pip ($0.10) × 100 oz = $10/lot
+    "XAUUSD": 100.0,    # 1 pip ($0.10) × 100 oz = $10/lot
+    "XAUUSDm": 100.0,    # 1 pip ($0.10) × 100 oz = $10/lot
     "XAGUSD": 10.0,    # same convention as Gold
     "EURUSD": 10.0,    # 0.0001 × 100,000 = $10/lot
     "GBPUSD": 10.0,
@@ -203,14 +204,14 @@ class RiskManager:
         JPY pairs     : 0.01
         Standard Forex: 0.0001
         """
-        if symbol in ("XAUUSD", "XAGUSD"):
+        if symbol in ("XAUUSD", "XAUUSDm"):
             return 0.10
         if "JPY" in symbol:
             return 0.01
         return 0.0001
 
     def _digits(self, symbol: str) -> int:
-        if symbol in ("XAUUSD", "XAGUSD"):
+        if symbol in ("XAUUSD", "XAUUSDm"):
             return 2   # e.g. 2150.50 — round to cents
         if "JPY" in symbol:
             return 3
