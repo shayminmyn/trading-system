@@ -12,6 +12,7 @@ Clone từ SonicRStrategy với các tối ưu bật sẵn:
   Opt-8  Partial Close          – chốt 50% tại R:R=1:1 → dời SL về entry + BE
   Opt-13 Absolute EMA Gap       – khoảng cách EMA34/89 phải > 50 pips (loại sideway)
   Opt-14 Minimum SL Width       – SL tối thiểu 150 pips; kéo ra nếu ATR tính hẹp hơn
+  Opt-15 HTF EMA Bias (H1)      – chỉ BUY khi EMA34(H1) > EMA89(H1); chỉ SELL ngược lại
 
 Tham số mặc định được hiệu chỉnh cho:
   • XAUUSD M5: H-L trung bình ~50–155 pips/nến, biến động cao
@@ -97,6 +98,13 @@ class SonicRM5Strategy(SonicRStrategy):
         # SL tối thiểu 150 pips — đủ "thở" trên M5 XAUUSD (ATR_M5 ≈ 50–155 pips)
         # Nếu ATR SL / Swing SL hẹp hơn, tự động kéo ra đến 150 pips
         "min_sl_pips": 150.0,
+
+        # ── Opt-15: Higher Timeframe (H1) EMA Bias Filter ─────────────────────
+        # Resample M5 → H1; BUY chỉ khi EMA34(H1) > EMA89(H1), và ngược lại.
+        "htf_ema_filter": True,
+        "htf_resample": "1h",           # M5 → H1
+        "htf_ema_fast": 34,             # PAC mid H1
+        "htf_ema_slow": 89,             # trend anchor H1
 
         # ── Entry mode ────────────────────────────────────────────────────────
         "limit_entry": False,

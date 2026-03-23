@@ -159,6 +159,12 @@ strategies:
     # ── Opt-14: Minimum SL Width ─────────────────────────────────────────────────────
     # SL tối thiểu pips; 0 = tắt; 150 pips cho M5 XAUUSD
     min_sl_pips: 0.0
+    # ── Opt-15: Higher Timeframe EMA Bias Filter ─────────────────────────────────────
+    # false = tắt; true cho M5 (resample M5→H1, check EMA34/89 H1)
+    htf_ema_filter: false
+    htf_resample: "1h"     # "1h"=H1, "4h"=H4, "1D"=D1
+    htf_ema_fast: 34
+    htf_ema_slow: 89
     # ── Bộ lọc tối ưu v3 ────────────────────────────────────────────────────────
     # Opt-1: EMA Dual Slope Filter
     require_ema_slope: false        # true = bật; chỉ vào lệnh khi EMA34+EMA89 đang dốc
@@ -292,6 +298,13 @@ strategies:
     # ── Opt-14: Minimum SL Width ──────────────────────────────────────────────
     # SL tối thiểu 150 pips — đủ "thở" cho XAUUSD M5
     min_sl_pips: 150.0
+
+    # ── Opt-15: Higher Timeframe (H1) EMA Bias Filter ─────────────────────────
+    # Resample M5 → H1; BUY chỉ khi EMA34(H1) > EMA89(H1), SELL ngược lại
+    htf_ema_filter: true
+    htf_resample: "1h"
+    htf_ema_fast: 34
+    htf_ema_slow: 89
 
     # ── Entry ─────────────────────────────────────────────────────────────────
     limit_entry: false                 # market order sau khi close xác nhận

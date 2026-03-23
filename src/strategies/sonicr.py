@@ -132,6 +132,17 @@ Parameters (config.yaml → strategies.SonicR)
                                          cơ sở nếu nó rộng hơn). Đảm bảo SL đủ "thở" trên M5.
                                          Ví dụ: 150 pips cho XAUUSD M5 (0=tắt)
 
+  ─── Opt-15: Higher Timeframe (HTF) EMA Bias Filter ─────────────────
+  htf_ema_filter         : bool  False  Bật bộ lọc xu hướng khung lớn. Chiều tín hiệu M5 phải
+                                         khớp với xu hướng H1 (hoặc khung được cấu hình).
+                                         BUY  chỉ khi EMA34(H1) > EMA89(H1)
+                                         SELL chỉ khi EMA34(H1) < EMA89(H1)
+                                         Loại bỏ các lệnh ngược xu hướng cấu trúc lớn hơn.
+  htf_resample           : str   "1h"   Tần số resample từ TF hiện tại lên khung lớn
+                                         (pandas offset alias: "1h"=H1, "4h"=H4, "1D"=D1)
+  htf_ema_fast           : int   34     EMA fast period trên khung lớn (default = EMA34)
+  htf_ema_slow           : int   89     EMA slow period trên khung lớn (default = EMA89)
+
   ─── Sideways Oscillation signal ──────────────────────────────────────
   enable_sw_signal       : bool  True
   sw_lookback            : int   30     Min bars to confirm sideway
@@ -268,6 +279,14 @@ class SonicRStrategy(BaseStrategy):
         # SL tối thiểu tính bằng pips; kéo ra nếu SL tính được hẹp hơn. 0 = tắt.
         self._min_sl_pips: float = float(p.get("min_sl_pips", 0.0))
 
+        # ── Opt-15: Higher Timeframe (HTF) EMA Bias Filter ─────────────────────
+        # Resample TF hiện tại → khung lớn hơn, kiểm tra EMA34 vs EMA89.
+        # Chỉ BUY khi EMA34(HTF) > EMA89(HTF); chỉ SELL khi ngược lại.
+        self._htf_ema_filter: bool = bool(p.get("htf_ema_filter", False))
+        self._htf_resample: str    = str(p.get("htf_resample", "1h"))
+        self._htf_ema_fast: int    = max(2, int(p.get("htf_ema_fast", 34)))
+        self._htf_ema_slow: int    = max(2, int(p.get("htf_ema_slow", 89)))
+
         # ── Sideways oscillation ──────────────────────────────────────────────
         self._enable_sw: bool          = bool(p.get("enable_sw_signal", True))
         self._sw_lookback: int         = p.get("sw_lookback", 30)
@@ -343,7 +362,7 @@ class SonicRStrategy(BaseStrategy):
             _ts = _ts.tz_localize("UTC")
         else:
             _ts = _ts.tz_convert("UTC")
-        if _ts < pd.Timestamp("2026-02-01", tz="UTC"):
+        if _ts < pd.Timestamp("2026-03-20", tz="UTC"):
             return self._no_signal()
 
         if curr["atr"] <= 0 or pd.isna(curr["atr"]):
@@ -365,6 +384,33 @@ class SonicRStrategy(BaseStrategy):
         if not self._ema_gap_ok(curr):
             return self._no_signal()
 
+        # ── Pick candidate signal across all layers ────────────────────────────
+        candidate = self._pick_candidate_signal(df, curr, prev)
+
+        # ── Opt-15: Higher Timeframe (HTF) EMA Bias Filter ────────────────────
+        # Áp dụng SAU KHI có candidate: lọc chiều ngược xu hướng H1 (hoặc HTF đã cấu hình).
+        if candidate is not None and self._htf_ema_filter:
+            htf_dir = self._htf_ema_dir(df)
+            if htf_dir is not None and candidate.action != htf_dir:
+                logger.debug(
+                    "SonicR HTF bias: %s signal blocked — H1 EMA34/89 bias is %s",
+                    candidate.action, htf_dir,
+                )
+                return self._no_signal()
+
+        return candidate if candidate is not None else self._no_signal()
+
+    def _pick_candidate_signal(
+        self,
+        df: pd.DataFrame,
+        curr: pd.Series,
+        prev: pd.Series,
+    ) -> Signal | None:
+        """
+        Execute all layer checks in priority order; return first signal found.
+        Extracted from generate_signal so the HTF bias filter can be applied
+        cleanly to the final candidate without touching every _check_* method.
+        """
         # ── Layer 1+2: PAC breakout / rejection (from MQ5) ────────────────────
         if self._enable_pac:
             if self._rejection_priority:
@@ -400,7 +446,7 @@ class SonicRStrategy(BaseStrategy):
             if sig is not None:
                 return sig
 
-        return self._no_signal()
+        return None
 
     # ── Layer 1: PAC Breakout ─────────────────────────────────────────────────
 
@@ -1456,6 +1502,63 @@ class SonicRStrategy(BaseStrategy):
                 transitions, n, self._dragon_zigzag_max_crosses,
             )
         return ok
+
+    # ── Opt-15: HTF EMA Bias ──────────────────────────────────────────────────
+
+    def _htf_ema_dir(self, df: pd.DataFrame) -> str | None:
+        """
+        Resample df lên khung lớn hơn (htf_resample, mặc định "1h" = H1),
+        tính EMA34 và EMA89 trên dữ liệu đã resample, và trả về:
+          "BUY"  — EMA34(HTF) > EMA89(HTF)  → xu hướng tăng H1
+          "SELL" — EMA34(HTF) < EMA89(HTF)  → xu hướng giảm H1
+          None   — không đủ dữ liệu hoặc EMA bằng nhau
+
+        Resampling từ M5 → H1 cần ít nhất htf_ema_slow × 12 + 50 nến M5.
+        Không thay đổi df gốc.
+        """
+        min_needed = self._htf_ema_slow * 12 + 50
+        if len(df) < min_needed:
+            logger.debug(
+                "SonicR HTF: not enough bars (%d < %d needed)", len(df), min_needed
+            )
+            return None
+        try:
+            raw = df[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+            raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
+            raw = raw.set_index("timestamp")
+            htf = raw.resample(self._htf_resample).agg(
+                {"open": "first", "high": "max", "low": "min",
+                 "close": "last", "volume": "sum"}
+            ).dropna(subset=["close"])
+
+            if len(htf) < self._htf_ema_slow + 5:
+                return None
+
+            ema_fast = EMAIndicator(
+                close=htf["close"], window=self._htf_ema_fast
+            ).ema_indicator()
+            ema_slow = EMAIndicator(
+                close=htf["close"], window=self._htf_ema_slow
+            ).ema_indicator()
+
+            v_fast = float(ema_fast.iloc[-1])
+            v_slow = float(ema_slow.iloc[-1])
+
+            if pd.isna(v_fast) or pd.isna(v_slow):
+                return None
+            if v_fast == v_slow:
+                return None
+
+            direction = "BUY" if v_fast > v_slow else "SELL"
+            logger.debug(
+                "SonicR HTF EMA%d/EMA%d (%s): %.5f / %.5f → %s bias",
+                self._htf_ema_fast, self._htf_ema_slow,
+                self._htf_resample, v_fast, v_slow, direction,
+            )
+            return direction
+        except Exception:
+            logger.debug("SonicR HTF EMA: resample error", exc_info=True)
+            return None
 
     def _is_sideways_no_dow(self, window: pd.DataFrame, atr: float) -> bool:
         """
