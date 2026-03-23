@@ -212,8 +212,9 @@ class BacktestEngine:
         
 
         signals = self._generate_signals(strategy, df)
-        # Per-strategy concurrent-trade limit (default: unconstrained = 999)
-        max_concurrent = getattr(strategy, "_max_concurrent_trades", 999)
+        # Per-strategy concurrent-trade limit; 0 (BaseStrategy default) = unconstrained
+        _raw_limit = getattr(strategy, "_max_concurrent_trades", 0)
+        max_concurrent = _raw_limit if _raw_limit > 0 else 999
         trades = self._simulate_trades(df, signals, risk_pct, rr_ratio, strategy.symbol, max_concurrent)
         result = self._compute_metrics(trades, strategy, df)
 

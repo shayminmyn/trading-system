@@ -27,9 +27,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/backtest.py",
             "args": [
-                "--strategy", "SonicR",
+                "--strategy", "SonicRM5",
                 "--symbol", "XAUUSD",
-                "--tf", "H1"
+                "--tf", "M5"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",

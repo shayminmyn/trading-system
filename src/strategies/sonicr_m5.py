@@ -94,6 +94,10 @@ class SonicRM5Strategy(SonicRStrategy):
         # Khoảng cách EMA34–EMA89 phải > 50 pips; nếu không → EMA đi sát → sideway
         "min_ema_gap_pips": 50.0,
 
+        # ── Opt-16: Max entry distance from pac_mid ───────────────────────────
+        # Bỏ qua nếu nến trigger đóng xa pac_mid hơn 1.5×ATR (nến bùng nổ)
+        "max_entry_pac_dist_atr": 1.5,
+
         # ── Opt-14: Minimum SL Width ──────────────────────────────────────────
         # SL tối thiểu 150 pips — đủ "thở" trên M5 XAUUSD (ATR_M5 ≈ 50–155 pips)
         # Nếu ATR SL / Swing SL hẹp hơn, tự động kéo ra đến 150 pips
@@ -108,6 +112,11 @@ class SonicRM5Strategy(SonicRStrategy):
         # Yêu cầu close(H1) nằm trên EMA34(H1) khi BUY, dưới khi SELL
         # Tránh vào lệnh khi H1 đang pullback về phía bất lợi
         "htf_require_close_vs_ema": True,
+
+        # ── Concurrent-trade limit ────────────────────────────────────────────
+        # 1 lệnh tại một thời điểm; slot giải phóng sau 200 bars M5 (≈ 16 giờ)
+        "max_concurrent_trades": 1,
+        "signal_ttl_bars": 200,
 
         # ── Entry mode ────────────────────────────────────────────────────────
         "limit_entry": False,

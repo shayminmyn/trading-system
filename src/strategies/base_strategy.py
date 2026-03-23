@@ -75,6 +75,16 @@ class BaseStrategy(ABC):
     Subclass must implement:
       - calculate_indicators(df) → pd.DataFrame   (add indicator columns)
       - generate_signal(df)     → Signal           (return signal from last row)
+
+    Concurrent-trade limiting
+    ─────────────────────────
+    max_concurrent_trades : int  0    Số lệnh tối đa đồng thời (0 = không giới hạn).
+                                       Backtesting: engine tự thi hành (engine-level gate).
+                                       Live: BaseStrategy theo dõi slots dùng TTL bars.
+    signal_ttl_bars       : int  0    Số bars một slot "tồn tại" trong live trading trước
+                                       khi tự động giải phóng (proxy trade duration).
+                                       0 = tắt live-gate (chỉ backtest engine có hiệu lực).
+                                       Ví dụ: SonicRM5 M5 → 200 bars ≈ 16 giờ.
     """
 
     def __init__(
@@ -88,6 +98,15 @@ class BaseStrategy(ABC):
         self.parameters: dict = parameters or {}
         self._data: pd.DataFrame = pd.DataFrame()
         self._min_bars: int = 50          # subclass may override
+
+        p = self.parameters
+        # Concurrent-trade gate (shared by backtest engine + live tracker)
+        self._max_concurrent_trades: int = int(p.get("max_concurrent_trades", 0))
+        # Live-only: TTL (in bars) before a slot is auto-released; 0 = live gate disabled
+        self._signal_ttl_bars: int = int(p.get("signal_ttl_bars", 0))
+        # Live slot state (bar index when each open signal was emitted)
+        self._live_open_slots: list[int] = []
+        self._live_bar_counter: int = 0
 
     @property
     def name(self) -> str:
@@ -107,9 +126,30 @@ class BaseStrategy(ABC):
         Entry point called by DataManager on each new bar.
         Runs calculate_indicators then generate_signal.
         Returns None if not enough data or signal is NONE.
+
+        Live concurrent-trade gate (when signal_ttl_bars > 0):
+          Tracks emitted signals as slots with a TTL measured in bars.
+          If max_concurrent_trades slots are still "open", skips signal
+          generation entirely.  A slot expires after signal_ttl_bars bars
+          (proxy for expected trade duration in live mode).
         """
         if len(df) < self._min_bars:
             return None
+
+        self._live_bar_counter += 1
+
+        # ── Live concurrent gate (only active when both params are set) ────────
+        limit = self._max_concurrent_trades
+        ttl   = self._signal_ttl_bars
+        if limit > 0 and ttl > 0:
+            cutoff = self._live_bar_counter - ttl
+            self._live_open_slots = [s for s in self._live_open_slots if s > cutoff]
+            if len(self._live_open_slots) >= limit:
+                logger.debug(
+                    "%s live concurrent gate: %d/%d slots used — skipping bar #%d",
+                    self.name, len(self._live_open_slots), limit, self._live_bar_counter,
+                )
+                return None
 
         self.update_data(df)
         try:
@@ -124,6 +164,12 @@ class BaseStrategy(ABC):
 
         if signal.is_actionable():
             logger.info("%s | %s", self.name, signal)
+            if limit > 0 and ttl > 0:
+                self._live_open_slots.append(self._live_bar_counter)
+                logger.debug(
+                    "%s live slot occupied: %d/%d (expires in %d bars)",
+                    self.name, len(self._live_open_slots), limit, ttl,
+                )
         return signal
 
     # ── Abstract methods ─────────────────────────────────────────────────────

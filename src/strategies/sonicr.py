@@ -142,6 +142,11 @@ Parameters (config.yaml → strategies.SonicR)
                                          (pandas offset alias: "1h"=H1, "4h"=H4, "1D"=D1)
   htf_ema_fast           : int   34     EMA fast period trên khung lớn (default = EMA34)
   htf_ema_slow           : int   89     EMA slow period trên khung lớn (default = EMA89)
+  max_entry_pac_dist_atr : float 0.0    (Layer 3a BUY★/SELL★) Nếu nến trigger đóng xa
+                                         pac_mid hơn N×ATR → bỏ qua (entry xấu do bùng nổ).
+                                         Ví dụ: 1.5 = bỏ nếu |close − pac_mid| > 1.5×ATR.
+                                         (0=tắt)
+
   htf_require_close_vs_ema: bool False  Nếu True, ngoài trend direction còn kiểm tra thêm:
                                          BUY  chỉ khi close(HTF) > EMA34(HTF)  (giá trên PAC mid H1)
                                          SELL chỉ khi close(HTF) < EMA34(HTF)  (giá dưới PAC mid H1)
@@ -290,6 +295,11 @@ class SonicRStrategy(BaseStrategy):
         self._htf_resample: str    = str(p.get("htf_resample", "1h"))
         self._htf_ema_fast: int    = max(2, int(p.get("htf_ema_fast", 34)))
         self._htf_ema_slow: int    = max(2, int(p.get("htf_ema_slow", 89)))
+        # ── Opt-16: Max entry distance from pac_mid (Layer 3a only) ───────────────
+        # Nếu nến trigger đóng quá xa pac_mid (bùng nổ mạnh), entry sẽ xấu.
+        # Giá trị 0 = tắt; 1.5 = bỏ nếu close xa pac_mid hơn 1.5×ATR.
+        self._max_entry_pac_dist_atr: float = float(p.get("max_entry_pac_dist_atr", 0.0))
+
         # Khi True: ngoài EMA34>EMA89 (H1 trend), còn yêu cầu close(H1) nằm đúng bên EMA34(H1)
         #   BUY  → close(H1) > EMA34(H1)  (giá đang trên PAC mid H1 — vùng sức mạnh)
         #   SELL → close(H1) < EMA34(H1)  (giá đang dưới PAC mid H1)
@@ -858,9 +868,23 @@ class SonicRStrategy(BaseStrategy):
         if not self._ema89_sloping_up(df):
             return None
 
-        # Trigger: close crosses above pac_mid
-        # if not (curr["close"] > pac_mid and prev["close"] <= pac_mid):
-        #     return None
+        # Trigger: nến hiện tại phải là nến đầu tiên đóng cửa TRÊN pac_mid
+        # (fresh cross — tránh vào lệnh muộn khi giá đã chạy xa pac_mid từ trước)
+        if not (curr["close"] > pac_mid and prev["close"] <= pac_mid):
+            return None
+
+        # Opt-16: kiểm tra entry không quá xa pac_mid (phòng ngừa nến bùng nổ)
+        if self._max_entry_pac_dist_atr > 0:
+            dist = abs(float(curr["close"]) - float(pac_mid))
+            if dist > self._max_entry_pac_dist_atr * float(atr):
+                logger.debug(
+                    "SonicR BUY★ skipped: entry %.5f too far from pac_mid %.5f "
+                    "(%.1f pips > %.1f×ATR)",
+                    float(curr["close"]), float(pac_mid),
+                    self._price_to_pips(dist),
+                    self._max_entry_pac_dist_atr,
+                )
+                return None
 
         # Strong bullish candle (optimisation filter)
         if self._req_strong_candle and not self._is_strong_candle(curr, "BUY"):
@@ -992,8 +1016,23 @@ class SonicRStrategy(BaseStrategy):
         if not self._ema89_sloping_down(df):
             return None
 
-        # if not (curr["close"] < pac_mid and prev["close"] >= pac_mid):
-        #     return None
+        # Trigger: nến hiện tại phải là nến đầu tiên đóng cửa DƯỚI pac_mid
+        # (fresh cross — tránh vào lệnh muộn khi giá đã chạy xa pac_mid từ trước)
+        if not (curr["close"] < pac_mid and prev["close"] >= pac_mid):
+            return None
+
+        # Opt-16: kiểm tra entry không quá xa pac_mid (phòng ngừa nến bùng nổ)
+        if self._max_entry_pac_dist_atr > 0:
+            dist = abs(float(curr["close"]) - float(pac_mid))
+            if dist > self._max_entry_pac_dist_atr * float(atr):
+                logger.debug(
+                    "SonicR SELL★ skipped: entry %.5f too far from pac_mid %.5f "
+                    "(%.1f pips > %.1f×ATR)",
+                    float(curr["close"]), float(pac_mid),
+                    self._price_to_pips(dist),
+                    self._max_entry_pac_dist_atr,
+                )
+                return None
 
         if self._req_strong_candle and not self._is_strong_candle(curr, "SELL"):
             return None

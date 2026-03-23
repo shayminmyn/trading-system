@@ -118,6 +118,9 @@ strategies:
   SonicR:
     allowed_timeframes: ["H1", "H4"]   # chỉ chạy trên H1/H4; [] = mọi TF
     allowed_symbols: ["XAUUSD", "EURUSD", "GBPUSD"]   # [] = mọi symbol
+    # 0 = không giới hạn; 1 = tối đa 1 lệnh đồng thời
+    max_concurrent_trades: 0
+    signal_ttl_bars: 0                  # 0 = tắt live-gate; H1: ~100 bars ≈ 4 ngày
     ema_fast: 34                    # EMA cluster ngắn hạn
     ema_slow: 89                    # EMA cluster dài hạn (xu hướng chính)
     atr_period: 14
@@ -159,6 +162,9 @@ strategies:
     # ── Opt-14: Minimum SL Width ─────────────────────────────────────────────────────
     # SL tối thiểu pips; 0 = tắt; 150 pips cho M5 XAUUSD
     min_sl_pips: 0.0
+    # ── Opt-16: Max entry distance from pac_mid (Layer 3a) ───────────────────────────
+    # 0 = tắt; 1.5 = bỏ nếu |close−pac_mid| > 1.5×ATR (nến bùng nổ)
+    max_entry_pac_dist_atr: 0.0
     # ── Opt-15: Higher Timeframe EMA Bias Filter ─────────────────────────────────────
     # false = tắt; true cho M5 (resample M5→H1, check EMA34/89 H1)
     htf_ema_filter: false
@@ -267,6 +273,9 @@ strategies:
   SonicRM5:
     allowed_timeframes: ["M5"]         # chỉ chạy trên M5
     allowed_symbols: ["XAUUSD"]
+    # Tối đa 1 lệnh đồng thời; live slot TTL = 200 bars M5 ≈ 16 giờ
+    max_concurrent_trades: 1
+    signal_ttl_bars: 200
     # ── SonicR M5 — bốn tối ưu bật sẵn ────────────────────────────────────────
     # Opt-1 EMA Slope, Opt-3 Marubozu BO confirmation, Opt-4 ATR SL, Opt-5 Close-touch.
     # Các tham số này ghi đè _M5_DEFAULTS trong SonicRM5Strategy.__init__.
@@ -299,6 +308,10 @@ strategies:
     # ── Opt-14: Minimum SL Width ──────────────────────────────────────────────
     # SL tối thiểu 150 pips — đủ "thở" cho XAUUSD M5
     min_sl_pips: 150.0
+
+    # ── Opt-16: Max entry distance from pac_mid (Layer 3a) ────────────────────
+    # Bỏ qua nếu nến trigger đóng xa pac_mid hơn 1.5×ATR (nến bùng nổ)
+    max_entry_pac_dist_atr: 1.5
 
     # ── Opt-15: Higher Timeframe (H1) EMA Bias Filter ─────────────────────────
     # Resample M5 → H1; BUY chỉ khi EMA34(H1) > EMA89(H1), SELL ngược lại
