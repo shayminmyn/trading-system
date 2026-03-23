@@ -380,7 +380,7 @@ class SonicRStrategy(BaseStrategy):
             _ts = _ts.tz_localize("UTC")
         else:
             _ts = _ts.tz_convert("UTC")
-        if _ts < pd.Timestamp("2026-03-20", tz="UTC"):
+        if _ts < pd.Timestamp("2026-01-10", tz="UTC"):
             return self._no_signal()
 
         if curr["atr"] <= 0 or pd.isna(curr["atr"]):

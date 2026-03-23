@@ -264,14 +264,24 @@ def main() -> None:
             n_strats,
         )
         if strat_log_every > 0 and nfeed % strat_log_every == 0:
+            ema34_val = ema89_val = close_val = None
+            if df is not None and nrows > 0:
+                last_row = df.iloc[-1]
+                close_val = last_row.get("close")
+                ema34_val = last_row.get("pac_mid") or last_row.get("ema34")
+                ema89_val = last_row.get("ema89")
             logger_main.info(
-                "strategy data feed %s %s #%d rows=%d last_ts=%s → submitting %d strategy(s)",
+                "strategy data feed %s %s #%d rows=%d last_ts=%s → %d strategy(s) | "
+                "close=%s ema34=%s ema89=%s",
                 symbol,
                 timeframe,
                 nfeed,
                 nrows,
                 last_ts,
                 n_strats,
+                f"{close_val:.5f}" if close_val is not None else "—",
+                f"{ema34_val:.5f}" if ema34_val is not None else "—",
+                f"{ema89_val:.5f}" if ema89_val is not None else "—",
             )
 
         futures = [
