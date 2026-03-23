@@ -374,6 +374,25 @@ class SonicRStrategy(BaseStrategy):
         curr = df.iloc[-1]
         prev = df.iloc[-2]
 
+        if len(df) % 1300 == 0:
+            logger.info(
+                "Bar debug ts=%s | curr O=%.5f H=%.5f L=%.5f C=%.5f ema34=%.5f ema89=%.5f | "
+                "prev O=%.5f H=%.5f L=%.5f C=%.5f ema34=%.5f ema89=%.5f",
+                curr["timestamp"],
+                float(curr["open"]),
+                float(curr["high"]),
+                float(curr["low"]),
+                float(curr["close"]),
+                float(curr["pac_mid"]),
+                float(curr["ema89"]),
+                float(prev["open"]),
+                float(prev["high"]),
+                float(prev["low"]),
+                float(prev["close"]),
+                float(prev["pac_mid"]),
+                float(prev["ema89"]),
+            )
+
         # Compare in UTC (CSV bars are tz-aware +00:00; naive cutoff would raise)
         _ts = pd.Timestamp(curr["timestamp"])
         if _ts.tzinfo is None:
