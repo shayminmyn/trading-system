@@ -132,4 +132,4 @@ class SonicRM5Strategy(SonicRStrategy):
         parameters: dict[str, Any] | None = None,
     ) -> None:
         merged = {**self._M5_DEFAULTS, **(parameters or {})}
-        super().__init__(symbol, timeframe, merged)
+        super().__init__(symbol, timeframe, parameters)

@@ -805,8 +805,8 @@ class SonicRStrategy(BaseStrategy):
             return None
 
         # Trigger: close crosses above pac_mid
-        if not (curr["close"] > pac_mid and prev["close"] <= pac_mid):
-            return None
+        # if not (curr["close"] > pac_mid and prev["close"] <= pac_mid):
+        #     return None
 
         # Strong bullish candle (optimisation filter)
         if self._req_strong_candle and not self._is_strong_candle(curr, "BUY"):
@@ -851,7 +851,7 @@ class SonicRStrategy(BaseStrategy):
         # Extension before pullback
         ext_end   = pb_start + first_touch_pos
         ext_start = max(0, ext_end - self._ext_lookback)
-        ext_slice = df.iloc[ext_start:ext_end]
+        ext_slice = df.iloc[ext_start:n]
 
         if ext_slice.empty:
             return None
@@ -938,8 +938,8 @@ class SonicRStrategy(BaseStrategy):
         if not self._ema89_sloping_down(df):
             return None
 
-        if not (curr["close"] < pac_mid and prev["close"] >= pac_mid):
-            return None
+        # if not (curr["close"] < pac_mid and prev["close"] >= pac_mid):
+        #     return None
 
         if self._req_strong_candle and not self._is_strong_candle(curr, "SELL"):
             return None
@@ -979,7 +979,7 @@ class SonicRStrategy(BaseStrategy):
 
         ext_end   = pb_start + first_touch_pos
         ext_start = max(0, ext_end - self._ext_lookback)
-        ext_slice = df.iloc[ext_start:ext_end]
+        ext_slice = df.iloc[ext_start:n]
 
         if ext_slice.empty:
             return None
