@@ -105,6 +105,9 @@ class SonicRM5Strategy(SonicRStrategy):
         "htf_resample": "1h",           # M5 → H1
         "htf_ema_fast": 34,             # PAC mid H1
         "htf_ema_slow": 89,             # trend anchor H1
+        # Yêu cầu close(H1) nằm trên EMA34(H1) khi BUY, dưới khi SELL
+        # Tránh vào lệnh khi H1 đang pullback về phía bất lợi
+        "htf_require_close_vs_ema": True,
 
         # ── Entry mode ────────────────────────────────────────────────────────
         "limit_entry": False,

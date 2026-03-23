@@ -142,6 +142,10 @@ Parameters (config.yaml → strategies.SonicR)
                                          (pandas offset alias: "1h"=H1, "4h"=H4, "1D"=D1)
   htf_ema_fast           : int   34     EMA fast period trên khung lớn (default = EMA34)
   htf_ema_slow           : int   89     EMA slow period trên khung lớn (default = EMA89)
+  htf_require_close_vs_ema: bool False  Nếu True, ngoài trend direction còn kiểm tra thêm:
+                                         BUY  chỉ khi close(HTF) > EMA34(HTF)  (giá trên PAC mid H1)
+                                         SELL chỉ khi close(HTF) < EMA34(HTF)  (giá dưới PAC mid H1)
+                                         Tránh vào BUY khi H1 đang pullback về dưới EMA34.
 
   ─── Sideways Oscillation signal ──────────────────────────────────────
   enable_sw_signal       : bool  True
@@ -286,6 +290,10 @@ class SonicRStrategy(BaseStrategy):
         self._htf_resample: str    = str(p.get("htf_resample", "1h"))
         self._htf_ema_fast: int    = max(2, int(p.get("htf_ema_fast", 34)))
         self._htf_ema_slow: int    = max(2, int(p.get("htf_ema_slow", 89)))
+        # Khi True: ngoài EMA34>EMA89 (H1 trend), còn yêu cầu close(H1) nằm đúng bên EMA34(H1)
+        #   BUY  → close(H1) > EMA34(H1)  (giá đang trên PAC mid H1 — vùng sức mạnh)
+        #   SELL → close(H1) < EMA34(H1)  (giá đang dưới PAC mid H1)
+        self._htf_require_close_vs_ema: bool = bool(p.get("htf_require_close_vs_ema", False))
 
         # ── Sideways oscillation ──────────────────────────────────────────────
         self._enable_sw: bool          = bool(p.get("enable_sw_signal", True))
@@ -1543,6 +1551,7 @@ class SonicRStrategy(BaseStrategy):
 
             v_fast = float(ema_fast.iloc[-1])
             v_slow = float(ema_slow.iloc[-1])
+            v_close = float(htf["close"].iloc[-1])
 
             if pd.isna(v_fast) or pd.isna(v_slow):
                 return None
@@ -1550,10 +1559,26 @@ class SonicRStrategy(BaseStrategy):
                 return None
 
             direction = "BUY" if v_fast > v_slow else "SELL"
+
+            # Opt-15 extra: close(HTF) phải nằm đúng bên EMA34(HTF)
+            if self._htf_require_close_vs_ema:
+                price_ok = (
+                    (direction == "BUY"  and v_close > v_fast) or
+                    (direction == "SELL" and v_close < v_fast)
+                )
+                if not price_ok:
+                    logger.debug(
+                        "SonicR HTF close filter: close=%.5f %s EMA%d(HTF)=%.5f → block %s",
+                        v_close,
+                        "not >" if direction == "BUY" else "not <",
+                        self._htf_ema_fast, v_fast, direction,
+                    )
+                    return None
+
             logger.debug(
-                "SonicR HTF EMA%d/EMA%d (%s): %.5f / %.5f → %s bias",
+                "SonicR HTF EMA%d/EMA%d (%s): ema=%.5f/%.5f close=%.5f → %s bias",
                 self._htf_ema_fast, self._htf_ema_slow,
-                self._htf_resample, v_fast, v_slow, direction,
+                self._htf_resample, v_fast, v_slow, v_close, direction,
             )
             return direction
         except Exception:

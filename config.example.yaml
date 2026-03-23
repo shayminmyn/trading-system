@@ -165,6 +165,7 @@ strategies:
     htf_resample: "1h"     # "1h"=H1, "4h"=H4, "1D"=D1
     htf_ema_fast: 34
     htf_ema_slow: 89
+    htf_require_close_vs_ema: false   # true = close(H1) phải đúng bên EMA34(H1)
     # ── Bộ lọc tối ưu v3 ────────────────────────────────────────────────────────
     # Opt-1: EMA Dual Slope Filter
     require_ema_slope: false        # true = bật; chỉ vào lệnh khi EMA34+EMA89 đang dốc
@@ -305,6 +306,7 @@ strategies:
     htf_resample: "1h"
     htf_ema_fast: 34
     htf_ema_slow: 89
+    htf_require_close_vs_ema: true    # close(H1) > EMA34(H1) cho BUY / < cho SELL
 
     # ── Entry ─────────────────────────────────────────────────────────────────
     limit_entry: false                 # market order sau khi close xác nhận
