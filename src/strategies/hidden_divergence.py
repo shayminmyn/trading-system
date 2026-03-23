@@ -80,10 +80,10 @@ from __future__ import annotations
 
 import pandas as pd
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
 from ta.volatility import AverageTrueRange
 
 from .base_strategy import BaseStrategy, Signal
+from ..utils.ema_mt5 import ema_mt5
 from ..utils.logger import get_logger
 
 logger = get_logger("hidden_divergence")
@@ -164,9 +164,9 @@ class HiddenDivergenceStrategy(BaseStrategy):
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df["rsi"]    = RSIIndicator(close=df["close"], window=self._rsi_period).rsi()
-        df["ema34"]  = EMAIndicator(close=df["close"], window=self._ema_fast).ema_indicator()
-        df["ema89"]  = EMAIndicator(close=df["close"], window=self._ema_slow).ema_indicator()
-        df["ema200"] = EMAIndicator(close=df["close"], window=self._ema_trend).ema_indicator()
+        df["ema34"]  = ema_mt5(df["close"], self._ema_fast)
+        df["ema89"]  = ema_mt5(df["close"], self._ema_slow)
+        df["ema200"] = ema_mt5(df["close"], self._ema_trend)
         df["atr"]    = AverageTrueRange(
             high=df["high"], low=df["low"], close=df["close"],
             window=self._atr_period,

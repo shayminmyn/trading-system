@@ -15,6 +15,7 @@ With no-GIL, all threads execute truly in parallel across CPU cores.
 
 from __future__ import annotations
 
+import math
 import signal
 import sys
 import threading
@@ -22,6 +23,7 @@ from collections import defaultdict
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
 
 from src.utils import get_logger, ConfigLoader, print_runtime_info, is_gil_enabled, get_optimal_workers
+from src.utils.ema_mt5 import ema_mt5
 from src.utils.paper_exit import paper_bar_exit
 from src.data import DataManager
 from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, SonicRFundStrategy, SonicRM15Strategy, SonicRM5Strategy
@@ -264,12 +266,18 @@ def main() -> None:
             n_strats,
         )
         if strat_log_every > 0 and nfeed % strat_log_every == 0:
-            ema34_val = ema89_val = close_val = None
-            if df is not None and nrows > 0:
-                last_row = df.iloc[-1]
-                close_val = last_row.get("close")
-                ema34_val = last_row.get("pac_mid") or last_row.get("ema34")
-                ema89_val = last_row.get("ema89")
+            close_val = ema34_val = ema89_val = None
+            if df is not None and nrows >= 89 and "close" in df.columns:
+                closes = df["close"].astype(float)
+                close_val = float(closes.iloc[-1])
+                ema34_s = ema_mt5(closes, 34)
+                ema89_s = ema_mt5(closes, 89)
+                e34 = float(ema34_s.iloc[-1])
+                e89 = float(ema89_s.iloc[-1])
+                ema34_val = None if math.isnan(e34) else e34
+                ema89_val = None if math.isnan(e89) else e89
+            elif df is not None and nrows > 0 and "close" in df.columns:
+                close_val = float(df["close"].iloc[-1])
             logger_main.info(
                 "strategy data feed %s %s #%d rows=%d last_ts=%s → %d strategy(s) | "
                 "close=%s ema34=%s ema89=%s",
@@ -280,8 +288,8 @@ def main() -> None:
                 last_ts,
                 n_strats,
                 f"{close_val:.5f}" if close_val is not None else "—",
-                f"{ema34_val:.5f}" if ema34_val is not None else "—",
-                f"{ema89_val:.5f}" if ema89_val is not None else "—",
+                f"{ema34_val:.5f}" if ema34_val is not None else "—(< 89 bars)",
+                f"{ema89_val:.5f}" if ema89_val is not None else "—(< 89 bars)",
             )
 
         futures = [

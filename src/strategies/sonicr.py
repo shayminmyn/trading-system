@@ -165,7 +165,9 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-from ta.trend import ADXIndicator, EMAIndicator
+from ta.trend import ADXIndicator
+
+from ..utils.ema_mt5 import ema_mt5
 from ta.volatility import AverageTrueRange
 
 from .base_strategy import BaseStrategy, Signal
@@ -329,15 +331,15 @@ class SonicRStrategy(BaseStrategy):
     # ── Indicators ────────────────────────────────────────────────────────────
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        # PAC Dragon Channel — EMA(34) applied to High, Low, Close
-        df["pac_mid"]  = EMAIndicator(close=df["close"], window=self._ema_fast).ema_indicator()
+        # PAC Dragon Channel — EMA(34) on High/Low/Close (MT5-compatible EMA)
+        df["pac_mid"]  = ema_mt5(df["close"], self._ema_fast)
         df["ema34"]    = df["pac_mid"]          # alias for backward compatibility
-        df["pac_high"] = EMAIndicator(close=df["high"],  window=self._ema_fast).ema_indicator()
-        df["pac_low"]  = EMAIndicator(close=df["low"],   window=self._ema_fast).ema_indicator()
+        df["pac_high"] = ema_mt5(df["high"], self._ema_fast)
+        df["pac_low"]  = ema_mt5(df["low"], self._ema_fast)
 
         # Trend EMAs
-        df["ema89"]  = EMAIndicator(close=df["close"], window=self._ema_slow).ema_indicator()
-        df["ema200"] = EMAIndicator(close=df["close"], window=self._ema_trend).ema_indicator()
+        df["ema89"]  = ema_mt5(df["close"], self._ema_slow)
+        df["ema200"] = ema_mt5(df["close"], self._ema_trend)
 
         # Volatility
         df["atr"] = AverageTrueRange(
@@ -1600,12 +1602,8 @@ class SonicRStrategy(BaseStrategy):
             if len(htf) < self._htf_ema_slow + 5:
                 return None
 
-            ema_fast = EMAIndicator(
-                close=htf["close"], window=self._htf_ema_fast
-            ).ema_indicator()
-            ema_slow = EMAIndicator(
-                close=htf["close"], window=self._htf_ema_slow
-            ).ema_indicator()
+            ema_fast = ema_mt5(htf["close"], self._htf_ema_fast)
+            ema_slow = ema_mt5(htf["close"], self._htf_ema_slow)
 
             v_fast = float(ema_fast.iloc[-1])
             v_slow = float(ema_slow.iloc[-1])
