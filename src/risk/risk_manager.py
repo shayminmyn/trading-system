@@ -34,8 +34,8 @@ logger = get_logger("risk_manager")
 
 # Default pip values per lot for common symbols (USD account)
 _DEFAULT_PIP_VALUE: dict[str, float] = {
-    "XAUUSD": 100.0,    # 1 pip ($0.10) × 100 oz = $10/lot
-    "XAUUSDm": 100.0,    # 1 pip ($0.10) × 100 oz = $10/lot
+    "XAUUSD": 10.0,     # 1 pip ($0.10) × 100 oz = $10/lot
+    "XAUUSDm": 10.0,    # 1 pip ($0.10) × 100 oz = $10/lot
     "XAGUSD": 10.0,    # same convention as Gold
     "EURUSD": 10.0,    # 0.0001 × 100,000 = $10/lot
     "GBPUSD": 10.0,
@@ -115,18 +115,35 @@ class RiskManager:
         try:
             pip_value = self._get_pip_value(signal.symbol)
             risk_usd = self._balance * self._risk_pct / 100.0
-            lot = self._calculate_lot(signal.sl_pips, pip_value, risk_usd)
-            sl_price = self._calculate_sl_price(signal.action, signal.entry, signal.sl_pips, signal.symbol)
-            tp1 = self._calculate_tp(signal.action, signal.entry, signal.sl_pips, signal.symbol, self._rr_ratio)
-            tp2 = self._calculate_tp(signal.action, signal.entry, signal.sl_pips, signal.symbol, self._rr_ratio * 1.5)
+
+            # For limit orders the fill price is limit_price, not the close of the
+            # signal bar.  All risk calculations (SL distance, lot, TP) must use the
+            # actual fill price so that SL pips, TP levels and lot size are correct.
+            actual_entry = signal.limit_price if signal.limit_price > 0 else signal.entry
+
+            # Use exact sl_level from strategy when available (swing/ATR price),
+            # then derive sl_pips from the real price distance to avoid pip-size
+            # mismatch bugs (e.g. XAUUSDm strategy computed pips with wrong pip size).
+            if signal.sl_level > 0:
+                sl_price = signal.sl_level
+                effective_sl_pips = abs(actual_entry - sl_price) / self._pip_size(signal.symbol)
+            else:
+                sl_price = self._calculate_sl_price(signal.action, actual_entry, signal.sl_pips, signal.symbol)
+                effective_sl_pips = signal.sl_pips
+
+            lot = self._calculate_lot(effective_sl_pips, pip_value, risk_usd)
+            tp1 = self._calculate_tp(signal.action, actual_entry, effective_sl_pips, signal.symbol, self._rr_ratio)
+            tp2 = self._calculate_tp(signal.action, actual_entry, effective_sl_pips, signal.symbol, self._rr_ratio * 1.5)
+
+            action_str = f"{signal.action} LIMIT" if signal.limit_price > 0 else signal.action
 
             cs = CompleteSignal(
                 symbol=signal.symbol,
                 timeframe=signal.timeframe,
-                action=f"{signal.action} LIMIT",
-                entry=signal.entry,
+                action=action_str,
+                entry=actual_entry,
                 sl=round(sl_price, self._digits(signal.symbol)),
-                sl_pips=signal.sl_pips,
+                sl_pips=round(effective_sl_pips, 1),
                 tp1=round(tp1, self._digits(signal.symbol)),
                 tp2=round(tp2, self._digits(signal.symbol)),
                 volume=lot,
@@ -158,12 +175,13 @@ class RiskManager:
             try:
                 info = self._mt5_connector.get_symbol_info(symbol)
                 if info:
-                    # pip_value = contract_size × point × (1 / quote_price if needed)
-                    # MT5 provides this directly; approximate here
                     point = info["point"]
                     contract = info["trade_contract_size"]
-                    # 1 pip = 10 × point for most 5-digit brokers
-                    pip = point * 10 if info["digits"] == 5 else point
+                    # 1 pip = 10 × point regardless of digit count:
+                    #   5-digit EURUSD  : point=0.00001 → pip=0.0001  ✓
+                    #   3-digit USDJPY  : point=0.001   → pip=0.01    ✓
+                    #   2-digit XAUUSD  : point=0.01    → pip=0.10    ✓
+                    pip = point * 10
                     return pip * contract
             except Exception:
                 pass
