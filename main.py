@@ -214,15 +214,192 @@ def main() -> None:
     strat_log_every = max(0, int(data_cfg.get("strategy_eval_log_every_n", 20)))
     _strat_feed_count: dict[tuple[str, str], int] = defaultdict(int)
 
+    def _tf_minutes(tf: str) -> int:
+        """Trả về số phút của một nến theo timeframe."""
+        tf = tf.upper()
+        _map = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                "H1": 60, "H4": 240, "D1": 1440, "W1": 10080}
+        return _map.get(tf, 1)
+
+    def _emit_open_tp_sl(
+        symbol: str, timeframe: str, st: dict, h: float, l: float, ts_str: str
+    ) -> None:
+        """Kiểm tra và xử lý TP/SL cho một vị thế OPEN. Gọi từ cả M1 lẫn TF gốc."""
+        key = (symbol, timeframe)
+        outcome = paper_bar_exit(st["is_buy"], h, l, st["sl"], st["tp"])
+        if outcome is None:
+            return
+
+        with paper_lock:
+            if paper_states.get(key) is None:
+                return
+            paper_states[key] = None
+
+        oid      = st.get("order_id", "")
+        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
+
+        _record_outcome(st.get("strategy", ""), symbol, timeframe, outcome.lower())
+        if outcome == "TP":
+            if notify_on_tp_hit:
+                notifier.send_text(
+                    "✅ <b>TP hit (paper)</b>\n"
+                    f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
+                    f"🤖 {st['strategy']}\n"
+                    f"💰 Entry <code>{st['entry']:.5f}</code> →  "
+                    f"<b>TP</b> <code>{st['tp']:.5f}</code>\n"
+                    f"🛑 SL ref: <code>{st['sl']:.5f}</code>"
+                    f"{oid_line}\n"
+                    f"🕐 <i>{ts_str}</i>"
+                )
+            logger_main.info(
+                "paper_track: TP hit %s %s order_id=%s → %s",
+                symbol, timeframe, oid, "stop" if stop_after_tp_hit else "continue",
+            )
+            if stop_after_tp_hit:
+                stop_event.set()
+        else:  # SL
+            if notify_on_sl_hit:
+                notifier.send_text(
+                    "🛑 <b>SL hit (paper)</b>\n"
+                    f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
+                    f"🤖 {st['strategy']}\n"
+                    f"💰 Entry <code>{st['entry']:.5f}</code> →  "
+                    f"<b>SL</b> <code>{st['sl']:.5f}</code>"
+                    f"{oid_line}\n"
+                    f"🕐 <i>{ts_str}</i>"
+                )
+            logger_main.info("paper_track: SL hit %s %s order_id=%s", symbol, timeframe, oid)
+            if stop_after_sl_hit:
+                stop_event.set()
+
+    def _check_paper_exit_m1(symbol: str, df_m1) -> None:
+        """
+        Callback M1 — xử lý TẤT CẢ paper states của symbol này mỗi phút:
+          - OPEN:    kiểm tra TP/SL trên nến M1 (nhanh hơn đợi nến TF gốc)
+          - PENDING: kiểm tra fill M1 + đếm ngược minutes_remaining cho expiry
+        """
+        if not paper_track_tp_sl:
+            return
+        if df_m1 is None or len(df_m1) < 1:
+            return
+        row = df_m1.iloc[-1]
+        h = float(row["high"])
+        l = float(row["low"])
+        o = float(row.get("open", row["close"]))
+        ts_str = str(row.get("timestamp", "—"))
+
+        with paper_lock:
+            relevant = [(k, dict(v)) for k, v in paper_states.items()
+                        if k[0] == symbol and v is not None]
+
+        for key, st in relevant:
+            status = st.get("status", "OPEN")
+
+            if status == "OPEN":
+                _emit_open_tp_sl(key[0], key[1], st, h, l, ts_str)
+
+            elif status == "PENDING":
+                lim      = float(st["limit_price"])
+                is_buy   = st["is_buy"]
+                sl_level = float(st.get("sl_level", 0.0))
+                rr_ratio = float(st.get("rr_ratio", 2.0))
+
+                # Fill check on M1 bar
+                filled, fill_price = False, lim
+                if is_buy:
+                    if o <= lim:
+                        filled, fill_price = True, o
+                    elif l <= lim:
+                        filled, fill_price = True, lim
+                else:
+                    if o >= lim:
+                        filled, fill_price = True, o
+                    elif h >= lim:
+                        filled, fill_price = True, lim
+
+                if filled:
+                    sl_dist  = abs(fill_price - sl_level) if sl_level > 0 else abs(fill_price - st["sl"])
+                    tp_dist  = sl_dist * rr_ratio
+                    sl_price = (fill_price - sl_dist) if is_buy else (fill_price + sl_dist)
+                    tp_price = (fill_price + tp_dist) if is_buy else (fill_price - tp_dist)
+                    with paper_lock:
+                        if paper_states.get(key) is None:
+                            continue
+                        paper_states[key] = {
+                            "status":    "OPEN",
+                            "symbol":    st["symbol"],
+                            "timeframe": st["timeframe"],
+                            "is_buy":    is_buy,
+                            "entry":     fill_price,
+                            "sl":        sl_price,
+                            "tp":        tp_price,
+                            "strategy":  st["strategy"],
+                            "notes":     st.get("notes", ""),
+                            "order_id":  st.get("order_id", ""),
+                            "mt5_ticket": st.get("mt5_ticket", 0),
+                        }
+                    logger_main.info(
+                        "paper_track(M1): limit FILLED %s %s fill=%.5f sl=%.5f tp=%.5f order_id=%s",
+                        key[0], key[1], fill_price, sl_price, tp_price, st.get("order_id", ""),
+                    )
+                    if notify_on_limit_fill:
+                        direction = "📈 BUY" if is_buy else "📉 SELL"
+                        oid = st.get("order_id", "")
+                        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
+                        notifier.send_text(
+                            f"🎯 <b>Limit Filled (paper)</b>\n"
+                            f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
+                            f"💰 Fill <code>{fill_price:.5f}</code>\n"
+                            f"🛑 SL <code>{sl_price:.5f}</code>  "
+                            f"✅ TP <code>{tp_price:.5f}</code>\n"
+                            f"🤖 {st['strategy']}"
+                            f"{oid_line}\n"
+                            f"🕐 <i>{ts_str}</i>"
+                        )
+                    continue
+
+                # Decrement minute countdown
+                mins_left = int(st.get("minutes_remaining", 0)) - 1
+                if mins_left <= 0:
+                    with paper_lock:
+                        paper_states[key] = None
+                    oid    = st.get("order_id", "")
+                    ticket = int(st.get("mt5_ticket", 0))
+                    total_mins = int(st.get("minutes_total", int(st.get("bars_remaining", 0))))
+                    logger_main.info(
+                        "paper_track(M1): limit EXPIRED %s %s lim=%.5f after %dm order_id=%s ticket=%d",
+                        key[0], key[1], lim, total_mins, oid, ticket,
+                    )
+                    if ticket > 0:
+                        mt5_executor.cancel_order_async(ticket, oid)
+                    _record_outcome(st.get("strategy", ""), st["symbol"], st["timeframe"], "expired")
+                    if notify_on_limit_expire:
+                        direction = "📈 BUY" if is_buy else "📉 SELL"
+                        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
+                        notifier.send_text(
+                            f"⌛ <b>Limit Expired (paper)</b>\n"
+                            f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
+                            f"📍 Limit <code>{lim:.5f}</code> — không fill sau "
+                            f"{total_mins} phút\n"
+                            f"🤖 {st['strategy']}"
+                            f"{oid_line}\n"
+                            f"🕐 <i>{ts_str}</i>"
+                        )
+                else:
+                    with paper_lock:
+                        if paper_states.get(key) is not None:
+                            paper_states[key] = {**st, "minutes_remaining": mins_left}
+
     def _check_paper_exit(symbol: str, timeframe: str, df) -> None:
         """
-        Check paper position each new closed bar.
+        Check paper position mỗi khi nến TF chiến lược đóng.
 
         State machine (per symbol+timeframe slot):
           PENDING → check fill (BUY: low <= limit, SELL: high >= limit)
-                  → if filled: transition to OPEN, recalculate SL/TP from fill price
+                  → if filled: transition to OPEN
                   → if bars_remaining == 0: EXPIRED → clear state
-          OPEN    → check TP/SL hit (same logic as backtest)
+          OPEN    → TP/SL check được xử lý bởi _check_paper_exit_m1 (M1 callback).
+                    Ở đây vẫn kiểm tra phòng hờ nếu M1 stream không khả dụng.
         """
         if not paper_track_tp_sl:
             return
@@ -243,153 +420,8 @@ def main() -> None:
 
         status = st.get("status", "OPEN")
 
-        # ── PENDING: check limit fill or expiry ───────────────────────────────
-        if status == "PENDING":
-            lim      = float(st["limit_price"])
-            is_buy   = st["is_buy"]
-            sl_level = float(st.get("sl_level", 0.0))
-            rr_ratio = float(st.get("rr_ratio", 2.0))
-            pip_size = float(st.get("pip_size", 0.10))
-
-            # Fill check — identical to BacktestEngine._find_limit_fill
-            filled     = False
-            fill_price = lim
-            if is_buy:
-                if o <= lim:          # gap down through limit → fill at open
-                    filled, fill_price = True, o
-                elif l <= lim:        # normal fill at our limit price
-                    filled, fill_price = True, lim
-            else:
-                if o >= lim:          # gap up through limit → fill at open
-                    filled, fill_price = True, o
-                elif h >= lim:
-                    filled, fill_price = True, lim
-
-            if filled:
-                # Recompute SL / TP from actual fill price (handles gap fills)
-                if sl_level > 0:
-                    sl_dist = abs(fill_price - sl_level)
-                else:
-                    sl_dist = abs(fill_price - st["sl"])   # fallback
-                tp_dist  = sl_dist * rr_ratio
-                sl_price = (fill_price - sl_dist) if is_buy else (fill_price + sl_dist)
-                tp_price = (fill_price + tp_dist) if is_buy else (fill_price - tp_dist)
-
-                with paper_lock:
-                    if paper_states.get(key) is None:
-                        return
-                    paper_states[key] = {
-                        "status":    "OPEN",
-                        "symbol":    st["symbol"],
-                        "timeframe": st["timeframe"],
-                        "is_buy":    is_buy,
-                        "entry":     fill_price,
-                        "sl":        sl_price,
-                        "tp":        tp_price,
-                        "strategy":  st["strategy"],
-                        "notes":     st.get("notes", ""),
-                        "order_id":  st.get("order_id", ""),
-                        "mt5_ticket": st.get("mt5_ticket", 0),
-                    }
-                logger_main.info(
-                    "paper_track: limit FILLED %s %s fill=%.5f sl=%.5f tp=%.5f order_id=%s",
-                    symbol, timeframe, fill_price, sl_price, tp_price, st.get("order_id", ""),
-                )
-                if notify_on_limit_fill:
-                    direction = "📈 BUY" if is_buy else "📉 SELL"
-                    oid = st.get("order_id", "")
-                    oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
-                    notifier.send_text(
-                        f"🎯 <b>Limit Filled (paper)</b>\n"
-                        f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
-                        f"💰 Fill <code>{fill_price:.5f}</code>\n"
-                        f"🛑 SL <code>{sl_price:.5f}</code>  "
-                        f"✅ TP <code>{tp_price:.5f}</code>\n"
-                        f"🤖 {st['strategy']}"
-                        f"{oid_line}\n"
-                        f"🕐 <i>{ts_str}</i>"
-                    )
-                return
-
-            # Not filled — decrement countdown
-            new_remaining = int(st["bars_remaining"]) - 1
-            if new_remaining <= 0:
-                with paper_lock:
-                    paper_states[key] = None
-                oid    = st.get("order_id", "")
-                ticket = int(st.get("mt5_ticket", 0))
-                logger_main.info(
-                    "paper_track: limit EXPIRED %s %s lim=%.5f after %d bars order_id=%s ticket=%d",
-                    symbol, timeframe, lim, int(st["bars_remaining"]), oid, ticket,
-                )
-                # Huỷ pending order trên MT5 nếu đã đặt
-                if ticket > 0:
-                    mt5_executor.cancel_order_async(ticket, oid)
-                _record_outcome(st.get("strategy", ""), st["symbol"], st["timeframe"], "expired")
-                if notify_on_limit_expire:
-                    direction = "📈 BUY" if is_buy else "📉 SELL"
-                    oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
-                    notifier.send_text(
-                        f"⌛ <b>Limit Expired (paper)</b>\n"
-                        f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
-                        f"📍 Limit <code>{lim:.5f}</code> — không fill sau "
-                        f"{int(st['bars_remaining'])} nến\n"
-                        f"🤖 {st['strategy']}"
-                        f"{oid_line}\n"
-                        f"🕐 <i>{ts_str}</i>"
-                    )
-            else:
-                with paper_lock:
-                    if paper_states.get(key) is not None:
-                        paper_states[key] = {**st, "bars_remaining": new_remaining}
-            return
-
-        # ── OPEN: check TP / SL hit ───────────────────────────────────────────
-        outcome = paper_bar_exit(st["is_buy"], h, l, st["sl"], st["tp"])
-        if outcome is None:
-            return
-
-        with paper_lock:
-            if paper_states.get(key) is None:
-                return
-            paper_states[key] = None
-
-        oid      = st.get("order_id", "")
-        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
-
-        _record_outcome(st.get("strategy", ""), symbol, timeframe, outcome.lower())
-        if outcome == "TP":
-            if notify_on_tp_hit:
-                notifier.send_text(
-                    "✅ <b>TP hit (paper / test)</b>\n"
-                    f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
-                    f"🤖 {st['strategy']}\n"
-                    f"💰 Entry <code>{st['entry']:.5f}</code> →  "
-                    f"<b>TP</b> <code>{st['tp']:.5f}</code>\n"
-                    f"🛑 SL ref: <code>{st['sl']:.5f}</code>"
-                    f"{oid_line}\n"
-                    f"🕐 Bar close: <i>{ts_str}</i>"
-                )
-            logger_main.info(
-                "paper_track: TP hit %s %s order_id=%s → %s",
-                symbol, timeframe, oid, "stop" if stop_after_tp_hit else "continue",
-            )
-            if stop_after_tp_hit:
-                stop_event.set()
-        else:  # SL
-            if notify_on_sl_hit:
-                notifier.send_text(
-                    "🛑 <b>SL hit (paper / test)</b>\n"
-                    f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
-                    f"🤖 {st['strategy']}\n"
-                    f"💰 Entry <code>{st['entry']:.5f}</code> →  "
-                    f"<b>SL</b> <code>{st['sl']:.5f}</code>"
-                    f"{oid_line}\n"
-                    f"🕐 Bar close: <i>{ts_str}</i>"
-                )
-            logger_main.info("paper_track: SL hit %s %s order_id=%s", symbol, timeframe, oid)
-            if stop_after_sl_hit:
-                stop_event.set()
+        # PENDING fill/expiry và OPEN TP/SL đều được xử lý bởi _check_paper_exit_m1.
+        # Hàm này chỉ là fallback khi M1 stream chưa có (môi trường mock/dev).
 
     def _register_paper(complete, sig=None) -> None:
         """
@@ -409,30 +441,34 @@ def main() -> None:
             is_limit = "LIMIT" in complete.action.upper()
 
             if is_limit:
-                expiry   = int(sig.limit_expiry_bars) if (sig and sig.limit_expiry_bars > 0) else 10
-                sl_level = float(sig.sl_level) if sig else 0.0
+                expiry_bars = int(sig.limit_expiry_bars) if (sig and sig.limit_expiry_bars > 0) else 10
+                sl_level    = float(sig.sl_level) if sig else 0.0
+                tf_mins     = _tf_minutes(complete.timeframe)
+                total_mins  = expiry_bars * tf_mins
                 paper_states[key] = {
-                    "status":        "PENDING",
-                    "symbol":        complete.symbol,
-                    "timeframe":     complete.timeframe,
-                    "is_buy":        is_buy,
-                    "limit_price":   float(complete.entry),
-                    "sl_level":      sl_level,
-                    "sl":            float(complete.sl),
-                    "tp":            float(complete.tp1),
-                    "rr_ratio":      float(complete.rr_ratio),
-                    "pip_size":      _pip_size_of(complete.symbol),
-                    "bars_remaining": expiry,
-                    "strategy":      complete.strategy_name,
-                    "notes":         complete.notes or "",
-                    "order_id":      complete.order_id,
-                    "mt5_ticket":    0,
+                    "status":           "PENDING",
+                    "symbol":           complete.symbol,
+                    "timeframe":        complete.timeframe,
+                    "is_buy":           is_buy,
+                    "limit_price":      float(complete.entry),
+                    "sl_level":         sl_level,
+                    "sl":               float(complete.sl),
+                    "tp":               float(complete.tp1),
+                    "rr_ratio":         float(complete.rr_ratio),
+                    "pip_size":         _pip_size_of(complete.symbol),
+                    "bars_remaining":   expiry_bars,
+                    "minutes_remaining": total_mins,
+                    "minutes_total":    total_mins,
+                    "strategy":         complete.strategy_name,
+                    "notes":            complete.notes or "",
+                    "order_id":         complete.order_id,
+                    "mt5_ticket":       0,
                 }
                 logger_main.info(
-                    "paper_track: PENDING %s %s %s limit=%.5f sl=%.5f tp=%.5f expiry=%d bars",
+                    "paper_track: PENDING %s %s %s limit=%.5f sl=%.5f tp=%.5f expiry=%d bars (%dm)",
                     complete.symbol, complete.timeframe,
                     "BUY LIMIT" if is_buy else "SELL LIMIT",
-                    complete.entry, complete.sl, complete.tp1, expiry,
+                    complete.entry, complete.sl, complete.tp1, expiry_bars, total_mins,
                 )
             else:
                 paper_states[key] = {
@@ -561,9 +597,23 @@ def main() -> None:
                             )
                             stop_event.set()
 
-    # Register callbacks
+    # Register callbacks — strategy processing
     for (symbol, tf) in strategy_map:
         data_manager.register_callback(symbol, tf, on_new_bar)
+
+    # Register M1 callback per symbol for fast TP/SL detection on OPEN positions
+    if paper_track_tp_sl:
+        _m1_symbols: set[str] = {sym for sym, _ in strategy_map}
+        for _sym in _m1_symbols:
+            _sym_ref = _sym  # capture for closure
+
+            def _make_m1_cb(s: str):
+                def _m1_cb(_symbol: str, _tf: str, df_m1) -> None:
+                    _check_paper_exit_m1(s, df_m1)
+                return _m1_cb
+
+            data_manager.register_callback(_sym, "M1", _make_m1_cb(_sym))
+            logger_main.info("paper_track: registered M1 TP/SL callback for %s", _sym)
 
     # ── Daily summary ─────────────────────────────────────────────────────────
     daily_cfg = cfg.raw.get("daily_summary", {}) or {}
@@ -698,11 +748,15 @@ def main() -> None:
                 )
                 return
             logger_main.error("MT5 order FAILED: %s", result)
+            extra_hint = ""
+            if result.error_code == 10027:
+                extra_hint = "\n⚠️ <b>AutoTrading đang TẮT</b> — bật nút AutoTrading trên toolbar MT5"
             notifier.send_text(
                 f"❌ <b>Đặt lệnh MT5 thất bại</b>\n"
                 f"{'📈' if 'BUY' in result.action else '📉'} "
                 f"<b>{result.action}</b>  {result.symbol}\n"
-                f"🚫 err={result.error_code}: {result.error_msg}\n"
+                f"🚫 err={result.error_code}: {result.error_msg}"
+                f"{extra_hint}\n"
                 f"🤖 {result.strategy_name}"
                 f"{oid_line}"
             )
