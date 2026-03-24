@@ -198,6 +198,16 @@ class MT5OrderExecutor:
     # ── Execution loop ────────────────────────────────────────────────────────
 
     def _exec_loop(self) -> None:
+        # MT5 Python API là thread-local: mỗi thread gọi MT5 phải tự
+        # initialize() + login() trong chính thread đó.
+        # _exec_loop chạy trong thread riêng → phải init trước khi nhận lệnh.
+        if not self._connector.init_thread():
+            logger.error(
+                "MT5 executor thread: init_thread() thất bại — "
+                "không thể đặt lệnh. Kiểm tra MT5 đang mở và credentials đúng."
+            )
+            return
+
         while not self._stop_event.is_set():
             try:
                 item = self._queue.get(timeout=1.0)
@@ -236,12 +246,56 @@ class MT5OrderExecutor:
             return self._send_limit(mt5, signal, is_buy, comment)
         return self._send_market(mt5, signal, is_buy, comment)
 
+    # ── Symbol selection helper ───────────────────────────────────────────────
+
+    def _ensure_symbol(self, mt5, signal: "CompleteSignal", order_type: str) -> "OrderResult | None":
+        """
+        Đảm bảo symbol được chọn vào Market Watch của MT5.
+        Trả về None nếu OK, trả về OrderResult lỗi nếu thất bại.
+
+        order_check trả về None khi symbol không có trong Market Watch hoặc
+        chưa được load đầy đủ thông tin. symbol_select() bắt buộc phải gọi
+        trước khi đặt lệnh bất kỳ với symbol đó.
+        """
+        if not mt5.symbol_select(signal.symbol, True):
+            err_code, err_msg = mt5.last_error()
+            logger.error(
+                "MT5 symbol_select(%s) failed: (%d) %s — "
+                "kiểm tra symbol đúng chính xác (kể cả suffix) và có trong Market Watch",
+                signal.symbol, err_code, err_msg,
+            )
+            return self._fail(
+                signal, order_type, err_code,
+                f"symbol_select({signal.symbol}) failed: ({err_code}) {err_msg}",
+            )
+
+        # Verify symbol info loaded after select
+        info = mt5.symbol_info(signal.symbol)
+        if info is None:
+            err_code, err_msg = mt5.last_error()
+            logger.error(
+                "MT5 symbol_info(%s) returned None after symbol_select: (%d) %s",
+                signal.symbol, err_code, err_msg,
+            )
+            return self._fail(
+                signal, order_type, err_code,
+                f"symbol_info({signal.symbol}) None: ({err_code}) {err_msg}",
+            )
+
+        logger.debug("MT5 symbol_select OK: %s trade_mode=%s", signal.symbol, info.trade_mode)
+        return None
+
     # ── Market order ──────────────────────────────────────────────────────────
 
     def _send_market(self, mt5, signal: "CompleteSignal", is_buy: bool, comment: str) -> OrderResult:
+        err = self._ensure_symbol(mt5, signal, "MARKET")
+        if err is not None:
+            return err
+
         tick = mt5.symbol_info_tick(signal.symbol)
         if tick is None:
-            return self._fail(signal, "MARKET", -2, f"no tick for {signal.symbol}")
+            err_code, err_msg = mt5.last_error()
+            return self._fail(signal, "MARKET", err_code, f"no tick for {signal.symbol}: ({err_code}) {err_msg}")
 
         price      = tick.ask if is_buy else tick.bid
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
@@ -276,6 +330,10 @@ class MT5OrderExecutor:
         return self._expiry_hours * scale
 
     def _send_limit(self, mt5, signal: "CompleteSignal", is_buy: bool, comment: str) -> OrderResult:
+        err = self._ensure_symbol(mt5, signal, "LIMIT")
+        if err is not None:
+            return err
+
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
         actual_expiry = self._scaled_expiry_hours(signal.timeframe)
 
@@ -322,14 +380,22 @@ class MT5OrderExecutor:
     ) -> OrderResult:
         # Pre-flight check
         check = mt5.order_check(request)
-        if check is None or check.retcode != 0:
-            code = check.retcode if check else -1
-            msg  = (check.comment if check else "order_check returned None") or str(code)
+        if check is None:
+            err_code, err_msg = mt5.last_error()
+            msg = f"order_check returned None — MT5 last_error: ({err_code}) {err_msg}"
+            logger.error(
+                "MT5 order_check [%s] symbol=%s: %s | request=%s",
+                order_type, signal.symbol, msg, request,
+            )
+            return self._fail(signal, order_type, err_code if err_code else -1, msg)
+
+        if check.retcode != 0:
+            msg = check.comment or f"retcode={check.retcode}"
             logger.error(
                 "MT5 order_check failed [%s] symbol=%s retcode=%d: %s",
-                order_type, signal.symbol, code, msg,
+                order_type, signal.symbol, check.retcode, msg,
             )
-            return self._fail(signal, order_type, code, f"order_check: {msg}")
+            return self._fail(signal, order_type, check.retcode, f"order_check: {msg}")
 
         logger.info(
             "MT5 order_send [%s] symbol=%s vol=%.2f price=%s sl=%s tp=%s",
@@ -340,8 +406,11 @@ class MT5OrderExecutor:
 
         if result is None:
             code, msg = mt5.last_error()
-            logger.error("MT5 order_send returned None: %d %s", code, msg)
-            return self._fail(signal, order_type, code, msg)
+            logger.error(
+                "MT5 order_send returned None [%s] symbol=%s: (%d) %s",
+                order_type, signal.symbol, code, msg,
+            )
+            return self._fail(signal, order_type, code, f"order_send None: ({code}) {msg}")
 
         # Requote retry (once)
         if result.retcode == _RETCODE_REQUOTE and self._retry_requote and not _retry:

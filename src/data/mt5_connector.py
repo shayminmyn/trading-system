@@ -112,6 +112,48 @@ class MT5Connector:
         self._connected = True
         return True
 
+    def init_thread(self) -> bool:
+        """
+        Khởi tạo MT5 trong thread hiện tại.
+
+        MT5 Python API là thread-local: mỗi thread muốn gọi MT5 API
+        (order_check, order_send, ...) PHẢI gọi initialize() + login()
+        trong chính thread đó trước tiên, dù thread khác đã gọi rồi.
+
+        Dùng trong _exec_loop của MT5OrderExecutor trước khi xử lý lệnh.
+        """
+        if self._mt5 is None or not self._connected:
+            logger.error("MT5 init_thread: connector chưa connect()")
+            return False
+
+        if not self._mt5.initialize():
+            logger.error(
+                "MT5 init_thread: initialize() failed in thread '%s': %s",
+                threading.current_thread().name,
+                self._mt5.last_error(),
+            )
+            return False
+
+        authorized = self._mt5.login(
+            login=self._login,
+            password=self._password,
+            server=self._server,
+            timeout=self._timeout,
+        )
+        if not authorized:
+            logger.error(
+                "MT5 init_thread: login() failed in thread '%s': %s",
+                threading.current_thread().name,
+                self._mt5.last_error(),
+            )
+            return False
+
+        logger.info(
+            "MT5 init_thread: OK — thread '%s' authenticated",
+            threading.current_thread().name,
+        )
+        return True
+
     def disconnect(self) -> None:
         if self._mt5 and self._connected:
             self._mt5.shutdown()
