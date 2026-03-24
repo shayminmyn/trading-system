@@ -364,26 +364,37 @@ def main() -> None:
                 if mins_left <= 0:
                     with paper_lock:
                         paper_store.set(key, None)
-                    oid    = st.get("order_id", "")
-                    ticket = int(st.get("mt5_ticket", 0))
+                    oid        = st.get("order_id", "")
+                    ticket     = int(st.get("mt5_ticket", 0))
                     total_mins = int(st.get("minutes_total", int(st.get("bars_remaining", 0))))
                     logger_main.info(
-                        "paper_track(M1): limit EXPIRED %s %s lim=%.5f after %dm order_id=%s ticket=%d",
+                        "paper_track(M1): limit EXPIRED %s %s lim=%.5f after %dm "
+                        "order_id=%s ticket=%d",
                         key[0], key[1], lim, total_mins, oid, ticket,
                     )
+                    # Huỷ pending order trên MT5 nếu đã đặt
                     if ticket > 0:
                         mt5_executor.cancel_order_async(ticket, oid)
+                        logger_main.info(
+                            "paper_track(M1): enqueued MT5 cancel ticket=%d order_id=%s",
+                            ticket, oid,
+                        )
                     _record_outcome(st.get("strategy", ""), st["symbol"], st["timeframe"], "expired")
                     if notify_on_limit_expire:
                         direction = "📈 BUY" if is_buy else "📉 SELL"
                         oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
+                        ticket_line = (
+                            f"\n🎫 ticket=<code>{ticket}</code> — đang huỷ trên MT5..."
+                            if ticket > 0 else ""
+                        )
                         notifier.send_text(
-                            f"⌛ <b>Limit Expired (paper)</b>\n"
+                            f"⌛ <b>Limit Expired</b>\n"
                             f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
                             f"📍 Limit <code>{lim:.5f}</code> — không fill sau "
                             f"{total_mins} phút\n"
                             f"🤖 {st['strategy']}"
-                            f"{oid_line}\n"
+                            f"{oid_line}"
+                            f"{ticket_line}\n"
                             f"🕐 <i>{ts_str}</i>"
                         )
                 else:
@@ -727,7 +738,20 @@ def main() -> None:
 
         if result.success:
             if result.order_type == "CANCEL":
-                return   # cancel acks are handled at the expiry notification site
+                already_msg = " (already closed)" in (result.error_msg or "")
+                logger_main.info(
+                    "MT5 cancel OK: ticket=%d order_id=%s%s",
+                    result.ticket, result.order_id,
+                    " — order was already gone" if already_msg else "",
+                )
+                # Gửi xác nhận huỷ thành công nếu order thực sự bị huỷ
+                if not already_msg:
+                    notifier.send_text(
+                        f"🗑 <b>Lệnh chờ đã huỷ (MT5)</b>\n"
+                        f"🎫 ticket=<code>{result.ticket}</code>\n"
+                        f"🆔 <code>{result.order_id}</code>"
+                    )
+                return
             logger_main.info("MT5 order placed: %s", result)
             notifier.send_text(
                 f"{'✅' if result.order_type == 'MARKET' else '⏳'} "
@@ -747,6 +771,12 @@ def main() -> None:
                 logger_main.warning(
                     "MT5 cancel FAILED ticket=%d order_id=%s: %s",
                     result.ticket, result.order_id, result.error_msg,
+                )
+                notifier.send_text(
+                    f"⚠️ <b>Không thể huỷ lệnh chờ MT5</b>\n"
+                    f"🎫 ticket=<code>{result.ticket}</code>\n"
+                    f"🚫 {html.escape(result.error_msg or '')}\n"
+                    f"<i>Vui lòng kiểm tra và huỷ thủ công trong MT5</i>"
                 )
                 return
             logger_main.error("MT5 order FAILED: %s", result)

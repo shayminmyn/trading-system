@@ -41,8 +41,11 @@ logger = get_logger("mt5_executor")
 # MT5 trade return codes (defined here so we don't import mt5 at module level)
 _RETCODE_DONE             = 10009   # mt5.TRADE_RETCODE_DONE
 _RETCODE_PLACED           = 10008   # mt5.TRADE_RETCODE_PLACED
+_RETCODE_CANCEL           = 10007   # mt5.TRADE_RETCODE_CANCEL — pending order removed
 _RETCODE_REQUOTE          = 10004   # mt5.TRADE_RETCODE_REQUOTE
 _RETCODE_AUTO_TRADING_OFF = 10027   # AutoTrading disabled by client
+_RETCODE_INVALID_ORDER    = 10006   # order not found (already closed/filled)
+_RETCODE_OK_CANCEL = (_RETCODE_DONE, _RETCODE_CANCEL)  # acceptable retcodes for cancel
 
 _FILLING_MAP = {
     "IOC":    1,   # mt5.ORDER_FILLING_IOC
@@ -354,16 +357,16 @@ class MT5OrderExecutor:
             ),
         }
 
-        if actual_expiry > 0:
-            exp = datetime.now(tz=timezone.utc) + timedelta(hours=actual_expiry)
-            # MT5 cần datetime không có tzinfo (UTC ngầm hiểu)
-            request["expiration"] = exp.replace(tzinfo=None)
-            logger.debug(
-                "Limit expiry for %s %s: %.2fh (base=%.2fh × scale=%.2f)",
-                signal.symbol, signal.timeframe,
-                actual_expiry, self._expiry_hours,
-                _TF_EXPIRY_SCALE.get(signal.timeframe.upper(), 1.0),
-            )
+        # if actual_expiry > 0:
+        #     exp = datetime.now(tz=timezone.utc) + timedelta(hours=actual_expiry)
+        #     # MT5 yêu cầu: không có tzinfo, không có microseconds
+        #     request["expiration"] = exp.replace(tzinfo=None, microsecond=0)
+        #     logger.debug(
+        #         "Limit expiry for %s %s: %.2fh (base=%.2fh × scale=%.2f)",
+        #         signal.symbol, signal.timeframe,
+        #         actual_expiry, self._expiry_hours,
+        #         _TF_EXPIRY_SCALE.get(signal.timeframe.upper(), 1.0),
+        #     )
 
         return self._do_send(mt5, request, "LIMIT", signal, float(signal.entry))
 
@@ -487,39 +490,72 @@ class MT5OrderExecutor:
         )
 
     def _execute_cancel(self, ticket: int, order_id: str) -> OrderResult:
-        """Huỷ pending order trên MT5 theo ticket."""
+        """
+        Huỷ pending order trên MT5 theo ticket (TRADE_ACTION_REMOVE).
+
+        Trước khi gửi lệnh huỷ, kiểm tra order còn tồn tại qua orders_get().
+        Nếu order đã được fill / đã huỷ trước đó → coi như thành công (idempotent).
+        """
         mt5 = getattr(self._connector, "_mt5", None)
         if mt5 is None or not self._connector.is_connected():
+            logger.error("MT5 cancel: connector not available ticket=%d", ticket)
             return OrderResult(
                 success=False, order_type="CANCEL", symbol="", action="CANCEL",
                 volume=0, price=0, sl=0, tp=0, ticket=ticket,
                 error_code=-1, error_msg="MT5 not connected", order_id=order_id,
             )
 
+        # Kiểm tra order có còn pending không
+        pending = mt5.orders_get(ticket=ticket)
+        if pending is None or len(pending) == 0:
+            # Order không còn tồn tại — đã fill hoặc đã huỷ rồi
+            logger.info(
+                "MT5 cancel: ticket=%d not found (already filled/cancelled) — skip",
+                ticket,
+            )
+            return OrderResult(
+                success=True, order_type="CANCEL", symbol="", action="CANCEL",
+                volume=0, price=0, sl=0, tp=0, ticket=ticket, order_id=order_id,
+                error_msg="order not found (already closed)",
+            )
+
+        symbol = pending[0].symbol if pending else ""
         request = {
             "action": mt5.TRADE_ACTION_REMOVE,
             "order":  ticket,
         }
         result = mt5.order_send(request)
+
         if result is None:
             code, msg = mt5.last_error()
-            logger.error("MT5 cancel failed ticket=%d: %d %s", ticket, code, msg)
-            return OrderResult(
-                success=False, order_type="CANCEL", symbol="", action="CANCEL",
-                volume=0, price=0, sl=0, tp=0, ticket=ticket,
-                error_code=code, error_msg=msg, order_id=order_id,
+            logger.error(
+                "MT5 cancel failed ticket=%d order_id=%s: (%d) %s",
+                ticket, order_id, code, msg,
             )
-        if result.retcode not in (_RETCODE_DONE, _RETCODE_PLACED):
-            msg = result.comment or f"retcode={result.retcode}"
-            logger.error("MT5 cancel failed ticket=%d retcode=%d: %s", ticket, result.retcode, msg)
             return OrderResult(
-                success=False, order_type="CANCEL", symbol="", action="CANCEL",
+                success=False, order_type="CANCEL", symbol=symbol, action="CANCEL",
+                volume=0, price=0, sl=0, tp=0, ticket=ticket,
+                error_code=code, error_msg=f"order_send None: ({code}) {msg}",
+                order_id=order_id,
+            )
+
+        if result.retcode not in _RETCODE_OK_CANCEL:
+            msg = result.comment or f"retcode={result.retcode}"
+            logger.error(
+                "MT5 cancel failed ticket=%d order_id=%s retcode=%d: %s",
+                ticket, order_id, result.retcode, msg,
+            )
+            return OrderResult(
+                success=False, order_type="CANCEL", symbol=symbol, action="CANCEL",
                 volume=0, price=0, sl=0, tp=0, ticket=ticket,
                 error_code=result.retcode, error_msg=msg, order_id=order_id,
             )
 
-        logger.info("MT5 pending order cancelled: ticket=%d order_id=%s", ticket, order_id)
+        logger.info(
+            "MT5 pending order cancelled OK: ticket=%d symbol=%s order_id=%s retcode=%d",
+            ticket, symbol, order_id, result.retcode,
+        )
         return OrderResult(
-            success=True, order_type="CANCEL", symbol="", action="CANCEL",
+            success=True, order_type="CANCEL", symbol=symbol, action="CANCEL",
             volume=0, price=0, sl=0, tp=0, ticket=ticket, order_id=order_id,
         )
