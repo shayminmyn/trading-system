@@ -134,6 +134,8 @@ strategies:
     # 0 = không giới hạn; 1 = tối đa 1 lệnh đồng thời
     max_concurrent_trades: 0
     signal_ttl_bars: 0                  # 0 = tắt live-gate; H1: ~100 bars ≈ 4 ngày
+    # Live: mỗi N nến log INFO `newbar SYMBOL TF` trong sonicr.py (SonicR*). 0 = tắt.
+    newbar_log_every_n: 1
     ema_fast: 34                    # EMA cluster ngắn hạn
     ema_slow: 89                    # EMA cluster dài hạn (xu hướng chính)
     atr_period: 14
@@ -395,6 +397,16 @@ concurrency:
   # With Python 3.13t/3.14t (no-GIL), these run truly in parallel.
   strategy_workers: 4
   data_workers: 4
+
+# ── Daily Summary ─────────────────────────────────────────────────────────────
+# Gửi Telegram tổng kết hằng ngày: số TP, SL, Expired và winrate
+# theo từng (strategy × symbol × timeframe).
+daily_summary:
+  enabled: true
+  # Giờ địa phương gửi (0 = nửa đêm UTC+7; tức 17:00 UTC)
+  hour_local: 0
+  # UTC offset của timezone địa phương
+  tz_offset_hours: 7
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging:

@@ -15,12 +15,15 @@ With no-GIL, all threads execute truly in parallel across CPU cores.
 
 from __future__ import annotations
 
+import html
 import math
 import signal
 import sys
 import threading
 from collections import defaultdict
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from src.utils import get_logger, ConfigLoader, print_runtime_info, is_gil_enabled, get_optimal_workers
 from src.utils.ema_mt5 import ema_mt5
@@ -32,6 +35,25 @@ from src.notifier import TelegramNotifier
 from src.execution import MT5OrderExecutor, OrderResult
 
 logger = get_logger("main", log_file="logs/trading.log")
+
+
+# ── Daily trade outcome tracking ──────────────────────────────────────────────
+
+@dataclass
+class _TradeOutcome:
+    """Aggregated trade outcomes for one (strategy, symbol, timeframe) bucket."""
+    tp: int = 0
+    sl: int = 0
+    expired: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.tp + self.sl + self.expired
+
+    @property
+    def winrate(self) -> float:
+        closed = self.tp + self.sl   # expired không tính vào winrate
+        return (self.tp / closed * 100) if closed > 0 else 0.0
 
 
 def _pip_size_of(symbol: str) -> float:
@@ -100,7 +122,7 @@ def build_strategies(config: dict) -> dict[tuple[str, str], list]:
                     continue
 
                 allowed_syms: list = params.pop("allowed_symbols", [])
-                if allowed_syms and symbol not in allowed_syms:
+                if allowed_syms and symbol.upper() not in [s.upper() for s in allowed_syms]:
                     logger.debug(
                         "Strategy %s skipped for %s/%s "
                         "(allowed_symbols=%s)",
@@ -161,7 +183,32 @@ def main() -> None:
     _first_sig_lock = threading.Lock()
     _first_sig_sent = False
     paper_lock = threading.Lock()
-    paper_state: dict | None = None
+    # Keyed by (symbol, timeframe) so each pair tracks independently.
+    # Value is the paper-trade state dict or None (no active position).
+    paper_states: dict[tuple[str, str], dict | None] = {}
+
+    # ── Daily stats ──────────────────────────────────────────────────────────
+    # key: (strategy_name, symbol, timeframe) → _TradeOutcome
+    _stats_lock = threading.Lock()
+    _daily_stats: dict[tuple[str, str, str], _TradeOutcome] = defaultdict(
+        lambda: _TradeOutcome()
+    )
+
+    def _record_outcome(strategy: str, symbol: str, timeframe: str, outcome: str) -> None:
+        """Thread-safe; outcome = 'tp' | 'sl' | 'expired'."""
+        key = (strategy, symbol, timeframe)
+        with _stats_lock:
+            obj = _daily_stats[key]
+            if outcome == "tp":
+                obj.tp += 1
+            elif outcome == "sl":
+                obj.sl += 1
+            elif outcome == "expired":
+                obj.expired += 1
+
+    def _reset_daily_stats() -> None:
+        with _stats_lock:
+            _daily_stats.clear()
 
     data_cfg = cfg.raw.get("data", {}) or {}
     strat_log_every = max(0, int(data_cfg.get("strategy_eval_log_every_n", 20)))
@@ -171,21 +218,20 @@ def main() -> None:
         """
         Check paper position each new closed bar.
 
-        State machine:
+        State machine (per symbol+timeframe slot):
           PENDING → check fill (BUY: low <= limit, SELL: high >= limit)
                   → if filled: transition to OPEN, recalculate SL/TP from fill price
                   → if bars_remaining == 0: EXPIRED → clear state
           OPEN    → check TP/SL hit (same logic as backtest)
         """
-        nonlocal paper_state
         if not paper_track_tp_sl:
             return
+        key = (symbol, timeframe)
         with paper_lock:
-            if paper_state is None:
+            slot = paper_states.get(key)
+            if slot is None:
                 return
-            if paper_state["symbol"] != symbol or paper_state["timeframe"] != timeframe:
-                return
-            st = dict(paper_state)
+            st = dict(slot)
 
         if df is None or len(df) < 1:
             return
@@ -230,9 +276,9 @@ def main() -> None:
                 tp_price = (fill_price + tp_dist) if is_buy else (fill_price - tp_dist)
 
                 with paper_lock:
-                    if paper_state is None:
+                    if paper_states.get(key) is None:
                         return
-                    paper_state = {
+                    paper_states[key] = {
                         "status":    "OPEN",
                         "symbol":    st["symbol"],
                         "timeframe": st["timeframe"],
@@ -269,8 +315,7 @@ def main() -> None:
             new_remaining = int(st["bars_remaining"]) - 1
             if new_remaining <= 0:
                 with paper_lock:
-                    if paper_state is not None:
-                        paper_state = None
+                    paper_states[key] = None
                 oid    = st.get("order_id", "")
                 ticket = int(st.get("mt5_ticket", 0))
                 logger_main.info(
@@ -280,6 +325,7 @@ def main() -> None:
                 # Huỷ pending order trên MT5 nếu đã đặt
                 if ticket > 0:
                     mt5_executor.cancel_order_async(ticket, oid)
+                _record_outcome(st.get("strategy", ""), st["symbol"], st["timeframe"], "expired")
                 if notify_on_limit_expire:
                     direction = "📈 BUY" if is_buy else "📉 SELL"
                     oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
@@ -294,8 +340,8 @@ def main() -> None:
                     )
             else:
                 with paper_lock:
-                    if paper_state is not None:
-                        paper_state = {**st, "bars_remaining": new_remaining}
+                    if paper_states.get(key) is not None:
+                        paper_states[key] = {**st, "bars_remaining": new_remaining}
             return
 
         # ── OPEN: check TP / SL hit ───────────────────────────────────────────
@@ -304,15 +350,14 @@ def main() -> None:
             return
 
         with paper_lock:
-            if paper_state is None:
+            if paper_states.get(key) is None:
                 return
-            if paper_state["symbol"] != symbol or paper_state["timeframe"] != timeframe:
-                return
-            paper_state = None
+            paper_states[key] = None
 
         oid      = st.get("order_id", "")
         oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
 
+        _record_outcome(st.get("strategy", ""), symbol, timeframe, outcome.lower())
         if outcome == "TP":
             if notify_on_tp_hit:
                 notifier.send_text(
@@ -348,17 +393,17 @@ def main() -> None:
 
     def _register_paper(complete, sig=None) -> None:
         """
-        Register a new paper position.
+        Register a new paper position for (symbol, timeframe).
 
-        Limit orders (action contains 'LIMIT'): stored as PENDING, waiting for fill.
-        Market orders: stored as OPEN immediately (entry at signal close + any slippage
-        already priced-in by RiskManager).
+        Each (symbol, timeframe) pair has its own independent slot.
+        Limit orders: stored as PENDING, waiting for fill.
+        Market orders: stored as OPEN immediately.
         """
-        nonlocal paper_state
         if not paper_track_tp_sl:
             return
+        key = (complete.symbol, complete.timeframe)
         with paper_lock:
-            if paper_state is not None:
+            if paper_states.get(key) is not None:
                 return
             is_buy  = "BUY"   in complete.action.upper()
             is_limit = "LIMIT" in complete.action.upper()
@@ -366,12 +411,12 @@ def main() -> None:
             if is_limit:
                 expiry   = int(sig.limit_expiry_bars) if (sig and sig.limit_expiry_bars > 0) else 10
                 sl_level = float(sig.sl_level) if sig else 0.0
-                paper_state = {
+                paper_states[key] = {
                     "status":        "PENDING",
                     "symbol":        complete.symbol,
                     "timeframe":     complete.timeframe,
                     "is_buy":        is_buy,
-                    "limit_price":   float(complete.entry),   # entry == limit_price after risk_manager fix
+                    "limit_price":   float(complete.entry),
                     "sl_level":      sl_level,
                     "sl":            float(complete.sl),
                     "tp":            float(complete.tp1),
@@ -390,7 +435,7 @@ def main() -> None:
                     complete.entry, complete.sl, complete.tp1, expiry,
                 )
             else:
-                paper_state = {
+                paper_states[key] = {
                     "status":    "OPEN",
                     "symbol":    complete.symbol,
                     "timeframe": complete.timeframe,
@@ -520,6 +565,91 @@ def main() -> None:
     for (symbol, tf) in strategy_map:
         data_manager.register_callback(symbol, tf, on_new_bar)
 
+    # ── Daily summary ─────────────────────────────────────────────────────────
+    daily_cfg = cfg.raw.get("daily_summary", {}) or {}
+    _daily_summary_enabled: bool = bool(daily_cfg.get("enabled", True))
+    _daily_summary_hour_local: int = int(daily_cfg.get("hour_local", 0))    # 0 = midnight (UTC+7)
+    _daily_tz_offset_hours: int = int(daily_cfg.get("tz_offset_hours", 7))  # UTC+7
+
+    def _build_daily_summary_text(snapshot: dict) -> str:
+        """Build Telegram HTML message từ snapshot _daily_stats."""
+        if not snapshot:
+            return "📊 <b>Tổng kết ngày</b>\n\n<i>Không có lệnh nào hôm nay.</i>"
+
+        # group by (symbol, timeframe) → list of (strategy, outcome)
+        grouped: dict[tuple[str, str], list[tuple[str, _TradeOutcome]]] = defaultdict(list)
+        for (strat, sym, tf), outcome in sorted(snapshot.items()):
+            grouped[(sym, tf)].append((strat, outcome))
+
+        now_local = datetime.now(timezone.utc) + timedelta(hours=_daily_tz_offset_hours)
+        date_str = now_local.strftime("%d/%m/%Y")
+
+        lines = [f"📊 <b>Tổng kết ngày {date_str}</b> (UTC+{_daily_tz_offset_hours})\n"]
+        total_tp = total_sl = total_exp = 0
+
+        for (sym, tf), entries in grouped.items():
+            lines.append(f"🔹 <b>{html.escape(sym)}</b> / <code>{html.escape(tf)}</code>")
+            for strat, o in entries:
+                wr = f"{o.winrate:.0f}%" if (o.tp + o.sl) > 0 else "—"
+                parts = []
+                if o.tp:
+                    parts.append(f"✅ TP {o.tp}")
+                if o.sl:
+                    parts.append(f"🛑 SL {o.sl}")
+                if o.expired:
+                    parts.append(f"⌛ Exp {o.expired}")
+                total_line = f"({o.total} lệnh)" if o.total else "(0 lệnh)"
+                lines.append(
+                    f"  🤖 {html.escape(strat)}  "
+                    + "  ".join(parts)
+                    + f"  WR {wr}  {total_line}"
+                )
+                total_tp += o.tp
+                total_sl += o.sl
+                total_exp += o.expired
+            lines.append("")
+
+        grand_total = total_tp + total_sl + total_exp
+        grand_wr = f"{total_tp / (total_tp + total_sl) * 100:.0f}%" if (total_tp + total_sl) > 0 else "—"
+        lines.append(
+            f"<b>Tổng:</b>  ✅TP {total_tp}  🛑SL {total_sl}  ⌛Exp {total_exp}"
+            f"  —  {grand_total} lệnh  WR {grand_wr}"
+        )
+        return "\n".join(lines)
+
+    def _next_summary_utc() -> datetime:
+        """Thời điểm UTC của lần gửi tổng kết tiếp theo (00:00 giờ địa phương = 17:00 UTC nếu UTC+7)."""
+        offset = timedelta(hours=_daily_tz_offset_hours)
+        now_utc = datetime.now(timezone.utc)
+        # Reset hour tính theo giờ địa phương
+        target_utc_hour = (_daily_summary_hour_local - _daily_tz_offset_hours) % 24
+        next_run = now_utc.replace(
+            hour=target_utc_hour, minute=0, second=0, microsecond=0
+        )
+        if next_run <= now_utc:
+            next_run += timedelta(days=1)
+        return next_run
+
+    def _daily_summary_loop() -> None:
+        while not stop_event.is_set():
+            next_run = _next_summary_utc()
+            wait_sec = (next_run - datetime.now(timezone.utc)).total_seconds()
+            logger_main.info(
+                "daily_summary: next send at %s UTC (%.0fs from now)",
+                next_run.strftime("%Y-%m-%d %H:%M UTC"), wait_sec,
+            )
+            # Chờ đến giờ, wake sớm nếu stop_event set
+            stop_event.wait(timeout=max(0, wait_sec))
+            if stop_event.is_set():
+                break
+            # Đủ giờ → snapshot + reset + send
+            with _stats_lock:
+                snapshot = {k: _TradeOutcome(v.tp, v.sl, v.expired) for k, v in _daily_stats.items()}
+            _reset_daily_stats()
+            text = _build_daily_summary_text(snapshot)
+            logger_main.info("daily_summary: sending\n%s", text)
+            notifier.send_text(text)
+
     # ── Start ─────────────────────────────────────────────────────────────────
     notifier.start()
     data_manager.start()
@@ -529,15 +659,17 @@ def main() -> None:
 
     def _on_order_result(result: OrderResult) -> None:
         """Callback: log + Telegram sau mỗi lần gửi lệnh MT5."""
-        # Liên kết MT5 ticket vào paper_state để có thể huỷ về sau
+        # Liên kết MT5 ticket vào paper_states để có thể huỷ về sau
         if result.success and result.order_type == "LIMIT" and result.order_id:
             with paper_lock:
-                if paper_state is not None and paper_state.get("order_id") == result.order_id:
-                    paper_state["mt5_ticket"] = result.ticket
-                    logger_main.info(
-                        "paper_track: MT5 ticket=%d linked order_id=%s",
-                        result.ticket, result.order_id,
-                    )
+                for slot in paper_states.values():
+                    if slot is not None and slot.get("order_id") == result.order_id:
+                        slot["mt5_ticket"] = result.ticket
+                        logger_main.info(
+                            "paper_track: MT5 ticket=%d linked order_id=%s",
+                            result.ticket, result.order_id,
+                        )
+                        break
 
         oid_line = f"\n🆔 <code>{result.order_id}</code>" if result.order_id else ""
 
@@ -577,6 +709,18 @@ def main() -> None:
 
     mt5_executor.add_result_callback(_on_order_result)
     mt5_executor.start()
+
+    if _daily_summary_enabled:
+        _summary_thread = threading.Thread(
+            target=_daily_summary_loop,
+            name="daily-summary",
+            daemon=True,
+        )
+        _summary_thread.start()
+        logger_main.info(
+            "daily_summary: enabled, fires at %02d:00 UTC+%d every day",
+            _daily_summary_hour_local, _daily_tz_offset_hours,
+        )
 
     notifier.send_text(
         "🤖 <b>Trading System Online</b>\n"

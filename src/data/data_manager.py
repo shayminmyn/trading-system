@@ -252,8 +252,8 @@ class DataManager:
             logger.info(
                 "Loaded %d warmup bars for %s %s", len(df), symbol, timeframe
             )
-            if self._connector and hasattr(self._connector, "get_ohlcv"):
-                self._log_warmup_tail(symbol, timeframe, df)
+            # if self._connector and hasattr(self._connector, "get_ohlcv"):
+                # self._log_warmup_tail(symbol, timeframe, df)
         except Exception as exc:
             logger.error("Failed to load warmup bars for %s %s: %s", symbol, timeframe, exc)
             with self._data_lock:
@@ -402,7 +402,8 @@ class DataManager:
         with self._data_lock:
             df = self._data.get(key, pd.DataFrame())
             if df.empty:
-                self._data[key] = pd.DataFrame([completed])
+                df = pd.DataFrame([completed])
+                self._data[key] = df
                 self._buffer_bar_count[key] += 1
                 new_count = self._buffer_bar_count[key]
                 buf_len = 1
@@ -428,7 +429,7 @@ class DataManager:
                 buf_len = len(df)
 
         if new_count:
-            self._maybe_log_bar_appended(key, new_count, completed, buf_len, to_spill)
+            self._maybe_log_bar_appended(key, new_count, completed, buf_len, to_spill, df)
         if to_spill is not None:
             self._append_buffer_to_spill_file(key, to_spill)
 
@@ -584,8 +585,11 @@ class DataManager:
         bar: pd.Series,
         buf_len: int,
         to_spill: "pd.DataFrame | None",
+        df: "pd.DataFrame | None" = None,
     ) -> None:
-        """Log INFO mỗi bar_log_every_n nến mới, bắt đầu từ nến đầu tiên (count=1)."""
+        """Log INFO mỗi bar_log_every_n nến mới, bắt đầu từ nến đầu tiên (count=1).
+        In thêm 3 nến mới nhất từ buffer để dễ debug.
+        """
         every = self._bar_log_every
         if count != 1 and (count - 1) % every != 0:
             return
@@ -606,6 +610,18 @@ class DataManager:
             self._buffer_max_bars,
             spill_info,
         )
+        if df is not None and not df.empty:
+            tail = df.tail(3)
+            lines = [f"  last {len(tail)} bars {key[0]} {key[1]}:"]
+            for _, row in tail.iterrows():
+                lines.append(
+                    f"    {row.get('timestamp','?')}  "
+                    f"O={float(row.get('open', float('nan'))):.5g}  "
+                    f"H={float(row.get('high', float('nan'))):.5g}  "
+                    f"L={float(row.get('low', float('nan'))):.5g}  "
+                    f"C={float(row.get('close', float('nan'))):.5g}"
+                )
+            logger.info("\n".join(lines))
 
     def _append_bar(self, symbol: str, timeframe: str, bar: pd.Series) -> None:
         key = (symbol, timeframe)
@@ -619,7 +635,7 @@ class DataManager:
             self._buffer_bar_count[key] += 1
             new_count = self._buffer_bar_count[key]
 
-        self._maybe_log_bar_appended(key, new_count, bar, len(df), to_spill)
+        self._maybe_log_bar_appended(key, new_count, bar, len(df), to_spill, df)
         if to_spill is not None:
             self._append_buffer_to_spill_file(key, to_spill)
 

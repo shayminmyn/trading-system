@@ -171,7 +171,32 @@ class TelegramNotifier:
             logger.warning("Telegram send queue full — signal dropped: %s", signal)
 
     def send_text(self, text: str) -> None:
-        """Send a raw text message (e.g. startup/status alerts)."""
+        """Send a raw text message (e.g. startup/status alerts).
+
+        Automatically splits messages longer than 4096 characters
+        (Telegram's per-message limit) into multiple sequential chunks.
+        Each chunk is enqueued separately.
+        """
+        MAX = 4000  # leave a small buffer below the 4096 hard limit
+        if len(text) <= MAX:
+            self._enqueue_text(text)
+            return
+        # Split on newline boundaries to avoid cutting mid-tag
+        lines = text.split("\n")
+        chunk_lines: list[str] = []
+        chunk_len = 0
+        for line in lines:
+            line_len = len(line) + 1  # +1 for the newline
+            if chunk_lines and chunk_len + line_len > MAX:
+                self._enqueue_text("\n".join(chunk_lines))
+                chunk_lines = []
+                chunk_len = 0
+            chunk_lines.append(line)
+            chunk_len += line_len
+        if chunk_lines:
+            self._enqueue_text("\n".join(chunk_lines))
+
+    def _enqueue_text(self, text: str) -> None:
         try:
             self._queue.put_nowait(text)
         except queue.Full:
