@@ -49,6 +49,23 @@ _FILLING_MAP = {
     "RETURN": 2,   # mt5.ORDER_FILLING_RETURN
 }
 
+# Hệ số scale thời gian hết hạn theo timeframe.
+# expiration_hours (config) là giá trị cơ sở cho H1/H4.
+# Timeframe nhỏ hơn → limit hết hạn sớm hơn để không treo lệnh quá lâu.
+# Ví dụ config expiration_hours=1:
+#   H1/H4 → 1h   M30 → 1h   M15 → 1h   M5 → 0.5h   M1 → 0.2h
+_TF_EXPIRY_SCALE: dict[str, float] = {
+    "M1":  0.10,
+    "M5":  0.50,
+    "M15": 1.00,
+    "M30": 1.00,
+    "H1":  1.00,
+    "H4":  1.00,
+    "D1":  1.00,
+    "W1":  1.00,
+    "MN1": 1.00,
+}
+
 
 @dataclass
 class OrderResult:
@@ -227,8 +244,20 @@ class MT5OrderExecutor:
 
     # ── Limit / Pending order ─────────────────────────────────────────────────
 
+    def _scaled_expiry_hours(self, timeframe: str) -> float:
+        """
+        Tính thời gian hết hạn thực tế dựa trên timeframe.
+
+        expiration_hours (config) là cơ sở cho H1/H4.
+        TF nhỏ hơn nhân với _TF_EXPIRY_SCALE để tránh treo lệnh quá lâu:
+          M1 × 0.20,  M5 × 0.50,  M15+ × 1.00
+        """
+        scale = _TF_EXPIRY_SCALE.get(timeframe.upper(), 1.0)
+        return self._expiry_hours * scale
+
     def _send_limit(self, mt5, signal: "CompleteSignal", is_buy: bool, comment: str) -> OrderResult:
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
+        actual_expiry = self._scaled_expiry_hours(signal.timeframe)
 
         request = {
             "action":       mt5.TRADE_ACTION_PENDING,
@@ -242,15 +271,21 @@ class MT5OrderExecutor:
             "magic":        self._magic,
             "comment":      comment,
             "type_time":    (
-                mt5.ORDER_TIME_SPECIFIED if self._expiry_hours > 0
+                mt5.ORDER_TIME_SPECIFIED if actual_expiry > 0
                 else mt5.ORDER_TIME_GTC
             ),
         }
 
-        if self._expiry_hours > 0:
-            exp = datetime.now(tz=timezone.utc) + timedelta(hours=self._expiry_hours)
+        if actual_expiry > 0:
+            exp = datetime.now(tz=timezone.utc) + timedelta(hours=actual_expiry)
             # MT5 cần datetime không có tzinfo (UTC ngầm hiểu)
             request["expiration"] = exp.replace(tzinfo=None)
+            logger.debug(
+                "Limit expiry for %s %s: %.2fh (base=%.2fh × scale=%.2f)",
+                signal.symbol, signal.timeframe,
+                actual_expiry, self._expiry_hours,
+                _TF_EXPIRY_SCALE.get(signal.timeframe.upper(), 1.0),
+            )
 
         return self._do_send(mt5, request, "LIMIT", signal, float(signal.entry))
 
