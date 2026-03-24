@@ -387,6 +387,10 @@ class SonicRStrategy(BaseStrategy):
         if _ts < pd.Timestamp("2026-01-01", tz="UTC"):
             return self._no_signal()
 
+        # if _ts >= pd.Timestamp("2026-03-23", tz="UTC"):
+        #     print(df.tail(5))
+        #     print("test")
+
         if curr["atr"] <= 0 or pd.isna(curr["atr"]):
             return self._no_signal()
 
@@ -1658,7 +1662,7 @@ class SonicRStrategy(BaseStrategy):
 
     def _pip_size(self) -> float:
         sym = self.symbol.upper()
-        if sym in ("XAUUSD", "XAGUSD"):
+        if sym in ("XAUUSD", "XAUUSDM", "XAGUSD"):
             return 0.10
         if "JPY" in sym:
             return 0.01

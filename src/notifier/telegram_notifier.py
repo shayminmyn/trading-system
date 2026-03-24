@@ -51,57 +51,40 @@ def _distance_pips(symbol: str, a: float, b: float) -> float:
 
 
 def _format_signal(signal: "CompleteSignal") -> str:
-    """Build the Telegram HTML-formatted message for a signal (SL / TP rõ ràng)."""
+    """Build the Telegram HTML-formatted message for a signal."""
     action_emoji = "📈" if "BUY" in signal.action else "📉"
     sym = signal.symbol
-    ep = _price_fmt(sym, signal.entry)
-    sl = _price_fmt(sym, signal.sl)
-    tp1 = _price_fmt(sym, signal.tp1)
+    ep   = _price_fmt(sym, signal.entry)
+    sl   = _price_fmt(sym, signal.sl)
+    tp1  = _price_fmt(sym, signal.tp1)
     tp1_pips = _distance_pips(sym, signal.entry, signal.tp1)
 
-    tp2_block = ""
+    tp2_line = ""
     if signal.tp2 is not None:
-        tp2 = _price_fmt(sym, signal.tp2)
+        tp2      = _price_fmt(sym, signal.tp2)
         tp2_pips = _distance_pips(sym, signal.entry, signal.tp2)
-        tp2_block = (
-            f"✅ <b>TP2 (Take Profit 2):</b> <code>{tp2}</code> "
-            f"<i>(~{tp2_pips:.0f} pips từ entry)</i>\n"
-        )
+        tp2_line = f"✅ TP2 <code>{tp2}</code> <i>(~{tp2_pips:.0f}p)</i>\n"
 
-    notes_block = ""
+    notes_line = ""
     if signal.notes and str(signal.notes).strip():
-        notes_block = (
-            f"📝 <b>Ghi chú:</b> {html.escape(str(signal.notes)[:800])}\n"
-        )
+        notes_line = f"📝 {html.escape(str(signal.notes)[:400])}\n"
 
     ts = signal.timestamp
-    if hasattr(ts, "strftime"):
-        ts_str = ts.strftime("%Y-%m-%d %H:%M UTC")
-    else:
-        ts_str = str(ts)
+    ts_str = ts.strftime("%d/%m %H:%M") if hasattr(ts, "strftime") else str(ts)
 
     return (
-        "🚨 <b>TÍN HIỆU GIAO DỊCH</b> 🚨\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔹 <b>Cặp:</b> {html.escape(sym)}\n"
-        f"⏱ <b>Khung TG:</b> {html.escape(signal.timeframe)}\n"
-        f"{action_emoji} <b>Lệnh:</b> {html.escape(signal.action)}\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Entry (vào lệnh):</b> <code>{ep}</code>\n"
-        "\n"
-        "🛑 <b>SL — Stop Loss (cắt lỗ)</b>\n"
-        f"   └ Giá: <code>{sl}</code>  |  <i>{signal.sl_pips:.0f} pips</i>\n"
-        "\n"
-        "✅ <b>TP — Take Profit (chốt lời)</b>\n"
-        f"   └ <b>TP1:</b> <code>{tp1}</code>  |  "
-        f"<i>~{tp1_pips:.0f} pips</i>  |  RR <b>1:{signal.rr_ratio:.1f}</b>\n"
-        f"{tp2_block}"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚖️ <b>Volume:</b> {signal.volume:.2f} lot "
-        f"<i>(Risk {signal.risk_percent:.1f}% ≈ ${signal.risk_amount_usd:,.2f})</i>\n"
-        f"🤖 <b>Strategy:</b> {html.escape(signal.strategy_name)}\n"
-        f"{notes_block}"
-        f"🕐 <i>{ts_str}</i>\n"
+        f"{action_emoji} <b>{html.escape(signal.action)}</b>  "
+        f"{html.escape(sym)}  <code>{html.escape(signal.timeframe)}</code>\n"
+        f"💰 <code>{ep}</code>  "
+        f"🛑 <code>{sl}</code> <i>({signal.sl_pips:.0f}p)</i>  "
+        f"RR <b>1:{signal.rr_ratio:.1f}</b>\n"
+        f"✅ TP1 <code>{tp1}</code> <i>(~{tp1_pips:.0f}p)</i>\n"
+        f"{tp2_line}"
+        f"⚖️ {signal.volume:.2f}L  "
+        f"Risk {signal.risk_percent:.1f}% ~${signal.risk_amount_usd:,.0f}  "
+        f"🤖 {html.escape(signal.strategy_name)}\n"
+        f"{notes_line}"
+        f"🕐 <i>{ts_str}</i>"
     )
 
 

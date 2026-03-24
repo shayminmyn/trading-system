@@ -299,12 +299,12 @@ class BacktestEngine:
     @staticmethod
     def _pip_size(symbol: str) -> float:
         """1 pip in price units.
-        XAUUSD/XAGUSD : $0.10  (1 USD move = 10 pips)
-        JPY pairs     : 0.01
-        Standard Forex: 0.0001
+        XAUUSD/XAUUSDm/XAGUSD : $0.10  (1 USD move = 10 pips)
+        JPY pairs              : 0.01
+        Standard Forex         : 0.0001
         """
         sym = symbol.upper()
-        if sym in ("XAUUSD", "XAGUSD"):
+        if sym in ("XAUUSD", "XAUUSDM", "XAGUSD"):
             return 0.10
         if "JPY" in sym:
             return 0.01
