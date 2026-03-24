@@ -242,8 +242,15 @@ class MT5OrderExecutor:
         is_buy   = "BUY"   in signal.action.upper()
         is_limit = "LIMIT" in signal.action.upper()
 
-        oid_suffix = f"|{signal.order_id}" if getattr(signal, "order_id", "") else ""
-        comment = f"{self._comment_prefix}|{signal.strategy_name[:14]}{oid_suffix}"[:31]
+        # MT5 comment: max 31 chars, chỉ dùng ký tự an toàn (không pipe, không ký tự đặc biệt).
+        # Format: "{prefix} {order_id}" để vừa nhận ra bot vừa trace được lệnh.
+        oid = getattr(signal, "order_id", "") or ""
+        max_oid_len = 31 - len(self._comment_prefix) - 1   # 1 cho dấu cách
+        if oid:
+            comment = f"{self._comment_prefix} {oid[:max_oid_len]}"
+        else:
+            strat_short = signal.strategy_name.replace("Strategy", "").replace("Strat", "")
+            comment = f"{self._comment_prefix} {strat_short}"[:31]
 
         if is_limit:
             return self._send_limit(mt5, signal, is_buy, comment)

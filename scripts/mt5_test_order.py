@@ -203,7 +203,7 @@ def main() -> int:
         "tp": 0.0,
         "deviation": deviation,
         "magic": magic,
-        "comment": comment,
+        "comment": "Bot XAUUSDM-M15-20260324-1430",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": filling,
     }
