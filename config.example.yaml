@@ -408,6 +408,19 @@ daily_summary:
   # UTC offset của timezone địa phương
   tz_offset_hours: 7
 
+# ── Redis State Store (tuỳ chọn) ──────────────────────────────────────────────
+# Bật Redis để lưu paper trading state bền vững qua các lần restart.
+# Nếu không cấu hình (hoặc enabled: false), dùng in-memory (mất khi restart).
+# Cài redis-py: pip install redis
+redis:
+  enabled: false                # true = dùng Redis, false = in-memory
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null                # null hoặc chuỗi mật khẩu
+  key_prefix: "trading:"        # prefix cho mọi key, phân tách môi trường
+  state_ttl_seconds: 604800     # TTL state (giây) — mặc định 7 ngày
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging:
   level: "INFO"                 # DEBUG | INFO | WARNING | ERROR

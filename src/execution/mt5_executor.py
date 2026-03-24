@@ -39,9 +39,10 @@ if TYPE_CHECKING:
 logger = get_logger("mt5_executor")
 
 # MT5 trade return codes (defined here so we don't import mt5 at module level)
-_RETCODE_DONE   = 10009   # mt5.TRADE_RETCODE_DONE
-_RETCODE_PLACED = 10008   # mt5.TRADE_RETCODE_PLACED
-_RETCODE_REQUOTE = 10004  # mt5.TRADE_RETCODE_REQUOTE
+_RETCODE_DONE             = 10009   # mt5.TRADE_RETCODE_DONE
+_RETCODE_PLACED           = 10008   # mt5.TRADE_RETCODE_PLACED
+_RETCODE_REQUOTE          = 10004   # mt5.TRADE_RETCODE_REQUOTE
+_RETCODE_AUTO_TRADING_OFF = 10027   # AutoTrading disabled by client
 
 _FILLING_MAP = {
     "IOC":    1,   # mt5.ORDER_FILLING_IOC
@@ -354,10 +355,18 @@ class MT5OrderExecutor:
 
         if result.retcode not in (_RETCODE_DONE, _RETCODE_PLACED):
             msg = result.comment or f"retcode={result.retcode}"
-            logger.error(
-                "MT5 order failed [%s] symbol=%s retcode=%d: %s",
-                order_type, signal.symbol, result.retcode, msg,
-            )
+            if result.retcode == _RETCODE_AUTO_TRADING_OFF:
+                logger.error(
+                    "MT5 AutoTrading DISABLED — bật nút 'AutoTrading' trên toolbar MT5 "
+                    "hoặc Tools → Options → Expert Advisors → Allow automated trading. "
+                    "symbol=%s retcode=%d",
+                    signal.symbol, result.retcode,
+                )
+            else:
+                logger.error(
+                    "MT5 order failed [%s] symbol=%s retcode=%d: %s",
+                    order_type, signal.symbol, result.retcode, msg,
+                )
             return self._fail(signal, order_type, result.retcode, msg)
 
         ticket    = result.order

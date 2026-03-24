@@ -33,6 +33,7 @@ from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrate
 from src.risk import RiskManager
 from src.notifier import TelegramNotifier
 from src.execution import MT5OrderExecutor, OrderResult
+from src.state import create_paper_store, PaperStateStore
 
 logger = get_logger("main", log_file="logs/trading.log")
 
@@ -184,8 +185,8 @@ def main() -> None:
     _first_sig_sent = False
     paper_lock = threading.Lock()
     # Keyed by (symbol, timeframe) so each pair tracks independently.
-    # Value is the paper-trade state dict or None (no active position).
-    paper_states: dict[tuple[str, str], dict | None] = {}
+    # Backend: RedisStateStore (if configured) or InMemoryStateStore (default).
+    paper_store: PaperStateStore = create_paper_store(cfg.raw)
 
     # ── Daily stats ──────────────────────────────────────────────────────────
     # key: (strategy_name, symbol, timeframe) → _TradeOutcome
@@ -231,9 +232,9 @@ def main() -> None:
             return
 
         with paper_lock:
-            if paper_states.get(key) is None:
+            if paper_store.get(key) is None:
                 return
-            paper_states[key] = None
+            paper_store.set(key, None)
 
         oid      = st.get("order_id", "")
         oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
@@ -289,8 +290,8 @@ def main() -> None:
         ts_str = str(row.get("timestamp", "—"))
 
         with paper_lock:
-            relevant = [(k, dict(v)) for k, v in paper_states.items()
-                        if k[0] == symbol and v is not None]
+            relevant = [(k, dict(v)) for k, v in paper_store.items()
+                        if k[0] == symbol]
 
         for key, st in relevant:
             status = st.get("status", "OPEN")
@@ -323,9 +324,9 @@ def main() -> None:
                     sl_price = (fill_price - sl_dist) if is_buy else (fill_price + sl_dist)
                     tp_price = (fill_price + tp_dist) if is_buy else (fill_price - tp_dist)
                     with paper_lock:
-                        if paper_states.get(key) is None:
+                        if paper_store.get(key) is None:
                             continue
-                        paper_states[key] = {
+                        paper_store.set(key, {
                             "status":    "OPEN",
                             "symbol":    st["symbol"],
                             "timeframe": st["timeframe"],
@@ -337,7 +338,7 @@ def main() -> None:
                             "notes":     st.get("notes", ""),
                             "order_id":  st.get("order_id", ""),
                             "mt5_ticket": st.get("mt5_ticket", 0),
-                        }
+                        })
                     logger_main.info(
                         "paper_track(M1): limit FILLED %s %s fill=%.5f sl=%.5f tp=%.5f order_id=%s",
                         key[0], key[1], fill_price, sl_price, tp_price, st.get("order_id", ""),
@@ -362,7 +363,7 @@ def main() -> None:
                 mins_left = int(st.get("minutes_remaining", 0)) - 1
                 if mins_left <= 0:
                     with paper_lock:
-                        paper_states[key] = None
+                        paper_store.set(key, None)
                     oid    = st.get("order_id", "")
                     ticket = int(st.get("mt5_ticket", 0))
                     total_mins = int(st.get("minutes_total", int(st.get("bars_remaining", 0))))
@@ -387,8 +388,8 @@ def main() -> None:
                         )
                 else:
                     with paper_lock:
-                        if paper_states.get(key) is not None:
-                            paper_states[key] = {**st, "minutes_remaining": mins_left}
+                        if paper_store.get(key) is not None:
+                            paper_store.set(key, {**st, "minutes_remaining": mins_left})
 
     def _check_paper_exit(symbol: str, timeframe: str, df) -> None:
         """
@@ -405,7 +406,7 @@ def main() -> None:
             return
         key = (symbol, timeframe)
         with paper_lock:
-            slot = paper_states.get(key)
+            slot = paper_store.get(key)
             if slot is None:
                 return
             st = dict(slot)
@@ -435,9 +436,9 @@ def main() -> None:
             return
         key = (complete.symbol, complete.timeframe)
         with paper_lock:
-            if paper_states.get(key) is not None:
+            if paper_store.get(key) is not None:
                 return
-            is_buy  = "BUY"   in complete.action.upper()
+            is_buy   = "BUY"   in complete.action.upper()
             is_limit = "LIMIT" in complete.action.upper()
 
             if is_limit:
@@ -445,25 +446,25 @@ def main() -> None:
                 sl_level    = float(sig.sl_level) if sig else 0.0
                 tf_mins     = _tf_minutes(complete.timeframe)
                 total_mins  = expiry_bars * tf_mins
-                paper_states[key] = {
-                    "status":           "PENDING",
-                    "symbol":           complete.symbol,
-                    "timeframe":        complete.timeframe,
-                    "is_buy":           is_buy,
-                    "limit_price":      float(complete.entry),
-                    "sl_level":         sl_level,
-                    "sl":               float(complete.sl),
-                    "tp":               float(complete.tp1),
-                    "rr_ratio":         float(complete.rr_ratio),
-                    "pip_size":         _pip_size_of(complete.symbol),
-                    "bars_remaining":   expiry_bars,
+                paper_store.set(key, {
+                    "status":            "PENDING",
+                    "symbol":            complete.symbol,
+                    "timeframe":         complete.timeframe,
+                    "is_buy":            is_buy,
+                    "limit_price":       float(complete.entry),
+                    "sl_level":          sl_level,
+                    "sl":                float(complete.sl),
+                    "tp":                float(complete.tp1),
+                    "rr_ratio":          float(complete.rr_ratio),
+                    "pip_size":          _pip_size_of(complete.symbol),
+                    "bars_remaining":    expiry_bars,
                     "minutes_remaining": total_mins,
-                    "minutes_total":    total_mins,
-                    "strategy":         complete.strategy_name,
-                    "notes":            complete.notes or "",
-                    "order_id":         complete.order_id,
-                    "mt5_ticket":       0,
-                }
+                    "minutes_total":     total_mins,
+                    "strategy":          complete.strategy_name,
+                    "notes":             complete.notes or "",
+                    "order_id":          complete.order_id,
+                    "mt5_ticket":        0,
+                })
                 logger_main.info(
                     "paper_track: PENDING %s %s %s limit=%.5f sl=%.5f tp=%.5f expiry=%d bars (%dm)",
                     complete.symbol, complete.timeframe,
@@ -471,7 +472,7 @@ def main() -> None:
                     complete.entry, complete.sl, complete.tp1, expiry_bars, total_mins,
                 )
             else:
-                paper_states[key] = {
+                paper_store.set(key, {
                     "status":    "OPEN",
                     "symbol":    complete.symbol,
                     "timeframe": complete.timeframe,
@@ -483,7 +484,7 @@ def main() -> None:
                     "notes":     complete.notes or "",
                     "order_id":  complete.order_id,
                     "mt5_ticket": 0,
-                }
+                })
                 logger_main.info(
                     "paper_track: OPEN %s %s %s entry=%.5f sl=%.5f tp=%.5f",
                     complete.symbol, complete.timeframe,
@@ -709,12 +710,13 @@ def main() -> None:
 
     def _on_order_result(result: OrderResult) -> None:
         """Callback: log + Telegram sau mỗi lần gửi lệnh MT5."""
-        # Liên kết MT5 ticket vào paper_states để có thể huỷ về sau
+        # Liên kết MT5 ticket vào paper_store để có thể huỷ về sau
         if result.success and result.order_type == "LIMIT" and result.order_id:
             with paper_lock:
-                for slot in paper_states.values():
-                    if slot is not None and slot.get("order_id") == result.order_id:
-                        slot["mt5_ticket"] = result.ticket
+                for k, slot in paper_store.items():
+                    if slot.get("order_id") == result.order_id:
+                        updated = {**slot, "mt5_ticket": result.ticket}
+                        paper_store.set(k, updated)
                         logger_main.info(
                             "paper_track: MT5 ticket=%d linked order_id=%s",
                             result.ticket, result.order_id,
