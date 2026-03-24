@@ -242,20 +242,25 @@ def main() -> None:
                         "tp":        tp_price,
                         "strategy":  st["strategy"],
                         "notes":     st.get("notes", ""),
+                        "order_id":  st.get("order_id", ""),
+                        "mt5_ticket": st.get("mt5_ticket", 0),
                     }
                 logger_main.info(
-                    "paper_track: limit FILLED %s %s fill=%.5f sl=%.5f tp=%.5f",
-                    symbol, timeframe, fill_price, sl_price, tp_price,
+                    "paper_track: limit FILLED %s %s fill=%.5f sl=%.5f tp=%.5f order_id=%s",
+                    symbol, timeframe, fill_price, sl_price, tp_price, st.get("order_id", ""),
                 )
                 if notify_on_limit_fill:
                     direction = "📈 BUY" if is_buy else "📉 SELL"
+                    oid = st.get("order_id", "")
+                    oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
                     notifier.send_text(
                         f"🎯 <b>Limit Filled (paper)</b>\n"
                         f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
                         f"💰 Fill <code>{fill_price:.5f}</code>\n"
                         f"🛑 SL <code>{sl_price:.5f}</code>  "
                         f"✅ TP <code>{tp_price:.5f}</code>\n"
-                        f"🤖 {st['strategy']}\n"
+                        f"🤖 {st['strategy']}"
+                        f"{oid_line}\n"
                         f"🕐 <i>{ts_str}</i>"
                     )
                 return
@@ -266,18 +271,25 @@ def main() -> None:
                 with paper_lock:
                     if paper_state is not None:
                         paper_state = None
+                oid    = st.get("order_id", "")
+                ticket = int(st.get("mt5_ticket", 0))
                 logger_main.info(
-                    "paper_track: limit EXPIRED %s %s lim=%.5f after %d bars",
-                    symbol, timeframe, lim, int(st["bars_remaining"]),
+                    "paper_track: limit EXPIRED %s %s lim=%.5f after %d bars order_id=%s ticket=%d",
+                    symbol, timeframe, lim, int(st["bars_remaining"]), oid, ticket,
                 )
+                # Huỷ pending order trên MT5 nếu đã đặt
+                if ticket > 0:
+                    mt5_executor.cancel_order_async(ticket, oid)
                 if notify_on_limit_expire:
                     direction = "📈 BUY" if is_buy else "📉 SELL"
+                    oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
                     notifier.send_text(
-                        f"❌ <b>Limit Expired (paper)</b>\n"
+                        f"⌛ <b>Limit Expired (paper)</b>\n"
                         f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
                         f"📍 Limit <code>{lim:.5f}</code> — không fill sau "
                         f"{int(st['bars_remaining'])} nến\n"
-                        f"🤖 {st['strategy']}\n"
+                        f"🤖 {st['strategy']}"
+                        f"{oid_line}\n"
                         f"🕐 <i>{ts_str}</i>"
                     )
             else:
@@ -298,6 +310,9 @@ def main() -> None:
                 return
             paper_state = None
 
+        oid      = st.get("order_id", "")
+        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
+
         if outcome == "TP":
             if notify_on_tp_hit:
                 notifier.send_text(
@@ -306,12 +321,13 @@ def main() -> None:
                     f"🤖 {st['strategy']}\n"
                     f"💰 Entry <code>{st['entry']:.5f}</code> →  "
                     f"<b>TP</b> <code>{st['tp']:.5f}</code>\n"
-                    f"🛑 SL ref: <code>{st['sl']:.5f}</code>\n"
+                    f"🛑 SL ref: <code>{st['sl']:.5f}</code>"
+                    f"{oid_line}\n"
                     f"🕐 Bar close: <i>{ts_str}</i>"
                 )
             logger_main.info(
-                "paper_track: TP hit %s %s → %s",
-                symbol, timeframe, "stop" if stop_after_tp_hit else "continue",
+                "paper_track: TP hit %s %s order_id=%s → %s",
+                symbol, timeframe, oid, "stop" if stop_after_tp_hit else "continue",
             )
             if stop_after_tp_hit:
                 stop_event.set()
@@ -322,10 +338,11 @@ def main() -> None:
                     f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
                     f"🤖 {st['strategy']}\n"
                     f"💰 Entry <code>{st['entry']:.5f}</code> →  "
-                    f"<b>SL</b> <code>{st['sl']:.5f}</code>\n"
+                    f"<b>SL</b> <code>{st['sl']:.5f}</code>"
+                    f"{oid_line}\n"
                     f"🕐 Bar close: <i>{ts_str}</i>"
                 )
-            logger_main.info("paper_track: SL hit %s %s", symbol, timeframe)
+            logger_main.info("paper_track: SL hit %s %s order_id=%s", symbol, timeframe, oid)
             if stop_after_sl_hit:
                 stop_event.set()
 
@@ -363,6 +380,8 @@ def main() -> None:
                     "bars_remaining": expiry,
                     "strategy":      complete.strategy_name,
                     "notes":         complete.notes or "",
+                    "order_id":      complete.order_id,
+                    "mt5_ticket":    0,
                 }
                 logger_main.info(
                     "paper_track: PENDING %s %s %s limit=%.5f sl=%.5f tp=%.5f expiry=%d bars",
@@ -381,6 +400,8 @@ def main() -> None:
                     "tp":        float(complete.tp1),
                     "strategy":  complete.strategy_name,
                     "notes":     complete.notes or "",
+                    "order_id":  complete.order_id,
+                    "mt5_ticket": 0,
                 }
                 logger_main.info(
                     "paper_track: OPEN %s %s %s entry=%.5f sl=%.5f tp=%.5f",
@@ -508,7 +529,21 @@ def main() -> None:
 
     def _on_order_result(result: OrderResult) -> None:
         """Callback: log + Telegram sau mỗi lần gửi lệnh MT5."""
+        # Liên kết MT5 ticket vào paper_state để có thể huỷ về sau
+        if result.success and result.order_type == "LIMIT" and result.order_id:
+            with paper_lock:
+                if paper_state is not None and paper_state.get("order_id") == result.order_id:
+                    paper_state["mt5_ticket"] = result.ticket
+                    logger_main.info(
+                        "paper_track: MT5 ticket=%d linked order_id=%s",
+                        result.ticket, result.order_id,
+                    )
+
+        oid_line = f"\n🆔 <code>{result.order_id}</code>" if result.order_id else ""
+
         if result.success:
+            if result.order_type == "CANCEL":
+                return   # cancel acks are handled at the expiry notification site
             logger_main.info("MT5 order placed: %s", result)
             notifier.send_text(
                 f"{'✅' if result.order_type == 'MARKET' else '⏳'} "
@@ -521,8 +556,15 @@ def main() -> None:
                 f"✅ TP <code>{result.tp}</code>\n"
                 f"⚖️ {result.volume:.2f} lot  🎫 ticket=<code>{result.ticket}</code>\n"
                 f"🤖 {result.strategy_name}"
+                f"{oid_line}"
             )
         else:
+            if result.order_type == "CANCEL":
+                logger_main.warning(
+                    "MT5 cancel FAILED ticket=%d order_id=%s: %s",
+                    result.ticket, result.order_id, result.error_msg,
+                )
+                return
             logger_main.error("MT5 order FAILED: %s", result)
             notifier.send_text(
                 f"❌ <b>Đặt lệnh MT5 thất bại</b>\n"
@@ -530,6 +572,7 @@ def main() -> None:
                 f"<b>{result.action}</b>  {result.symbol}\n"
                 f"🚫 err={result.error_code}: {result.error_msg}\n"
                 f"🤖 {result.strategy_name}"
+                f"{oid_line}"
             )
 
     mt5_executor.add_result_callback(_on_order_result)

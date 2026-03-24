@@ -48,6 +48,19 @@ _DEFAULT_PIP_VALUE: dict[str, float] = {
 }
 
 
+def _make_order_id(ts, symbol: str, timeframe: str) -> str:
+    """Generate a unique order ID: SYMBOL-TF-YYYYMMdd-HHMM from bar timestamp."""
+    if hasattr(ts, "strftime"):
+        date_str = ts.strftime("%Y%m%d")
+        time_str = ts.strftime("%H%M")
+    else:
+        now = datetime.now(tz=timezone.utc)
+        date_str = now.strftime("%Y%m%d")
+        time_str = now.strftime("%H%M")
+    sym = symbol.replace(".", "").upper()[:8]
+    return f"{sym}-{timeframe.upper()}-{date_str}-{time_str}"
+
+
 @dataclass
 class CompleteSignal:
     """Fully resolved signal ready for notification."""
@@ -67,6 +80,7 @@ class CompleteSignal:
     strategy_name: str
     notes: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    order_id: str = ""
 
     def __str__(self) -> str:
         return (
@@ -153,6 +167,7 @@ class RiskManager:
                 strategy_name=signal.strategy_name,
                 notes=signal.notes,
                 timestamp=signal.timestamp,
+                order_id=_make_order_id(signal.timestamp, signal.symbol, signal.timeframe),
             )
             logger.info("Risk calc complete: %s", cs)
             return cs

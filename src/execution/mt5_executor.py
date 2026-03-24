@@ -72,9 +72,9 @@ class OrderResult:
     """Kết quả sau mỗi lần gửi lệnh."""
 
     success: bool
-    order_type: str           # "MARKET" | "LIMIT"
+    order_type: str           # "MARKET" | "LIMIT" | "CANCEL"
     symbol: str
-    action: str               # "BUY" | "SELL" | "BUY LIMIT" | "SELL LIMIT"
+    action: str               # "BUY" | "SELL" | "BUY LIMIT" | "SELL LIMIT" | "CANCEL"
     volume: float
     price: float              # giá thực tế fill (market) hoặc limit price (pending)
     sl: float
@@ -83,6 +83,7 @@ class OrderResult:
     error_code: int = 0
     error_msg: str = ""
     strategy_name: str = ""
+    order_id: str = ""        # định danh nội bộ: SYMBOL-TF-YYYYMMdd-HHMM
 
     def __str__(self) -> str:
         if self.success:
@@ -118,7 +119,7 @@ class MT5OrderExecutor:
         self._retry_requote: bool  = bool(exec_cfg.get("retry_on_requote", True))
         self._connector            = connector   # MT5Connector instance (may be None on mock)
 
-        self._queue: queue.Queue                        = queue.Queue(maxsize=100)
+        self._queue: queue.Queue                        = queue.Queue(maxsize=200)
         self._stop_event                                = threading.Event()
         self._exec_thread: threading.Thread | None      = None
         self._result_callbacks: list[Callable[[OrderResult], None]] = []
@@ -175,6 +176,20 @@ class MT5OrderExecutor:
         except queue.Full:
             logger.warning("MT5 executor queue full — signal dropped: %s", signal)
 
+    def cancel_order_async(self, ticket: int, order_id: str = "") -> None:
+        """
+        Enqueue lệnh huỷ pending order theo ticket. Non-blocking.
+        Dùng khi paper track phát hiện limit hết hạn → đồng bộ huỷ trên MT5.
+        """
+        if not self._enabled:
+            return
+        cmd = {"_cmd": "CANCEL", "ticket": ticket, "order_id": order_id}
+        try:
+            self._queue.put_nowait(cmd)
+            logger.debug("Cancel command enqueued: ticket=%d order_id=%s", ticket, order_id)
+        except queue.Full:
+            logger.warning("MT5 executor queue full — cancel dropped: ticket=%d", ticket)
+
     @property
     def is_enabled(self) -> bool:
         return self._enabled
@@ -184,8 +199,11 @@ class MT5OrderExecutor:
     def _exec_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                signal = self._queue.get(timeout=1.0)
-                result = self._execute(signal)
+                item = self._queue.get(timeout=1.0)
+                if isinstance(item, dict) and item.get("_cmd") == "CANCEL":
+                    result = self._execute_cancel(item["ticket"], item.get("order_id", ""))
+                else:
+                    result = self._execute(item)
                 self._queue.task_done()
                 self._fire_callbacks(result)
             except queue.Empty:
@@ -210,7 +228,8 @@ class MT5OrderExecutor:
         is_buy   = "BUY"   in signal.action.upper()
         is_limit = "LIMIT" in signal.action.upper()
 
-        comment = f"{self._comment_prefix}|{signal.strategy_name[:18]}"
+        oid_suffix = f"|{signal.order_id}" if getattr(signal, "order_id", "") else ""
+        comment = f"{self._comment_prefix}|{signal.strategy_name[:14]}{oid_suffix}"[:31]
 
         if is_limit:
             return self._send_limit(mt5, signal, is_buy, comment)
@@ -358,6 +377,7 @@ class MT5OrderExecutor:
             tp=float(signal.tp1),
             ticket=ticket,
             strategy_name=signal.strategy_name,
+            order_id=getattr(signal, "order_id", ""),
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -385,4 +405,43 @@ class MT5OrderExecutor:
             error_code=code,
             error_msg=msg,
             strategy_name=signal.strategy_name,
+            order_id=getattr(signal, "order_id", ""),
+        )
+
+    def _execute_cancel(self, ticket: int, order_id: str) -> OrderResult:
+        """Huỷ pending order trên MT5 theo ticket."""
+        mt5 = getattr(self._connector, "_mt5", None)
+        if mt5 is None or not self._connector.is_connected():
+            return OrderResult(
+                success=False, order_type="CANCEL", symbol="", action="CANCEL",
+                volume=0, price=0, sl=0, tp=0, ticket=ticket,
+                error_code=-1, error_msg="MT5 not connected", order_id=order_id,
+            )
+
+        request = {
+            "action": mt5.TRADE_ACTION_REMOVE,
+            "order":  ticket,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            code, msg = mt5.last_error()
+            logger.error("MT5 cancel failed ticket=%d: %d %s", ticket, code, msg)
+            return OrderResult(
+                success=False, order_type="CANCEL", symbol="", action="CANCEL",
+                volume=0, price=0, sl=0, tp=0, ticket=ticket,
+                error_code=code, error_msg=msg, order_id=order_id,
+            )
+        if result.retcode not in (_RETCODE_DONE, _RETCODE_PLACED):
+            msg = result.comment or f"retcode={result.retcode}"
+            logger.error("MT5 cancel failed ticket=%d retcode=%d: %s", ticket, result.retcode, msg)
+            return OrderResult(
+                success=False, order_type="CANCEL", symbol="", action="CANCEL",
+                volume=0, price=0, sl=0, tp=0, ticket=ticket,
+                error_code=result.retcode, error_msg=msg, order_id=order_id,
+            )
+
+        logger.info("MT5 pending order cancelled: ticket=%d order_id=%s", ticket, order_id)
+        return OrderResult(
+            success=True, order_type="CANCEL", symbol="", action="CANCEL",
+            volume=0, price=0, sl=0, tp=0, ticket=ticket, order_id=order_id,
         )

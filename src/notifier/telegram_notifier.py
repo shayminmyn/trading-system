@@ -72,6 +72,10 @@ def _format_signal(signal: "CompleteSignal") -> str:
     ts = signal.timestamp
     ts_str = ts.strftime("%d/%m %H:%M") if hasattr(ts, "strftime") else str(ts)
 
+    oid_line = ""
+    if getattr(signal, "order_id", ""):
+        oid_line = f"🆔 <code>{html.escape(signal.order_id)}</code>\n"
+
     return (
         f"{action_emoji} <b>{html.escape(signal.action)}</b>  "
         f"{html.escape(sym)}  <code>{html.escape(signal.timeframe)}</code>\n"
@@ -84,6 +88,7 @@ def _format_signal(signal: "CompleteSignal") -> str:
         f"Risk {signal.risk_percent:.1f}% ~${signal.risk_amount_usd:,.0f}  "
         f"🤖 {html.escape(signal.strategy_name)}\n"
         f"{notes_line}"
+        f"{oid_line}"
         f"🕐 <i>{ts_str}</i>"
     )
 
