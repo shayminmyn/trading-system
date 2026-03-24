@@ -144,6 +144,10 @@ class DataManager:
             self._connector.disconnect()
         logger.info("DataManager stopped")
 
+    def get_connector(self):
+        """Return the underlying data connector (MT5Connector or None for mock)."""
+        return self._connector
+
     def load_historical(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """Load historical bars for backtesting (no streaming)."""
         return self._historical_loader.load(symbol, timeframe)

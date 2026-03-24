@@ -29,6 +29,7 @@ from src.data import DataManager
 from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, SonicRFundStrategy, SonicRM15Strategy, SonicRM5Strategy
 from src.risk import RiskManager
 from src.notifier import TelegramNotifier
+from src.execution import MT5OrderExecutor, OrderResult
 
 logger = get_logger("main", log_file="logs/trading.log")
 
@@ -483,6 +484,7 @@ def main() -> None:
             if complete:
                 notifier.send_signal(complete)
                 _register_paper(complete, sig)
+                mt5_executor.submit_signal(complete)
                 # Khi đang chờ TP paper, không dừng ngay sau tín hiệu đầu
                 if stop_after_first_signal and not paper_track_tp_sl:
                     with _first_sig_lock:
@@ -501,9 +503,42 @@ def main() -> None:
     notifier.start()
     data_manager.start()
 
+    # MT5 Order Executor — phải khởi tạo SAU data_manager.start() để connector đã sẵn sàng
+    mt5_executor = MT5OrderExecutor(cfg.raw, data_manager.get_connector())
+
+    def _on_order_result(result: OrderResult) -> None:
+        """Callback: log + Telegram sau mỗi lần gửi lệnh MT5."""
+        if result.success:
+            logger_main.info("MT5 order placed: %s", result)
+            notifier.send_text(
+                f"{'✅' if result.order_type == 'MARKET' else '⏳'} "
+                f"<b>{'Lệnh đặt thành công' if result.order_type == 'MARKET' else 'Lệnh chờ đặt xong'}"
+                f" (MT5)</b>\n"
+                f"{'📈' if 'BUY' in result.action else '📉'} "
+                f"<b>{result.action}</b>  {result.symbol}\n"
+                f"💰 Price <code>{result.price}</code>  "
+                f"🛑 SL <code>{result.sl}</code>  "
+                f"✅ TP <code>{result.tp}</code>\n"
+                f"⚖️ {result.volume:.2f} lot  🎫 ticket=<code>{result.ticket}</code>\n"
+                f"🤖 {result.strategy_name}"
+            )
+        else:
+            logger_main.error("MT5 order FAILED: %s", result)
+            notifier.send_text(
+                f"❌ <b>Đặt lệnh MT5 thất bại</b>\n"
+                f"{'📈' if 'BUY' in result.action else '📉'} "
+                f"<b>{result.action}</b>  {result.symbol}\n"
+                f"🚫 err={result.error_code}: {result.error_msg}\n"
+                f"🤖 {result.strategy_name}"
+            )
+
+    mt5_executor.add_result_callback(_on_order_result)
+    mt5_executor.start()
+
     notifier.send_text(
         "🤖 <b>Trading System Online</b>\n"
         f"Symbols: {[p['symbol'] for p in cfg['trading_pairs']]}\n"
+        f"MT5 execution: {'✅ ON' if mt5_executor.is_enabled else '⏸ OFF (paper only)'}\n"
         f"GIL disabled: {not is_gil_enabled()}"
     )
     _flags = []
@@ -514,6 +549,8 @@ def main() -> None:
             f"paper_track TP(notify={notify_on_tp_hit},stop={stop_after_tp_hit}) "
             f"SL(notify={notify_on_sl_hit},stop={stop_after_sl_hit})"
         )
+    if mt5_executor.is_enabled:
+        _flags.append(f"mt5_execution(magic={cfg.raw.get('execution', {}).get('magic_number', 20260101)})")
     logger_main.info(
         "Trading system running. Press Ctrl+C to stop.%s",
         (" [" + ", ".join(_flags) + "]") if _flags else "",
@@ -530,6 +567,7 @@ def main() -> None:
     stop_event.wait()
 
     logger_main.info("Stopping all modules…")
+    mt5_executor.stop()
     data_manager.stop()
     executor.shutdown(wait=False)
     notifier.stop()

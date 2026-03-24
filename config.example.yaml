@@ -50,6 +50,19 @@ mt5:
   server: "Exness-MT5Real"      # e.g. ICMarketsSC-Demo, Exness-MT5Real
   timeout: 60000                # ms
 
+# ── MT5 Order Execution ───────────────────────────────────────────────────────
+# Đặt lệnh thực tế vào MT5 qua Python API. CHỈ hoạt động trên Windows + MT5 đang mở.
+# CẢNH BÁO: enabled=true sẽ gửi lệnh thật vào tài khoản MT5 của bạn!
+# Kiểm tra kỹ với enabled=false (paper-only) trước khi bật thật.
+execution:
+  enabled: false              # true = gửi lệnh thật; false = chỉ paper track + Telegram
+  magic_number: 20260101      # Số magic để nhận ra lệnh của bot trong MT5
+  deviation_points: 20        # Slippage tối đa cho market order (1 point = 0.1 pip XAUUSD)
+  comment_prefix: "Bot"       # Tiền tố comment lệnh hiển thị trong MT5
+  expiration_hours: 0         # Giờ hết hạn limit order (0 = GTC — tốt đến khi huỷ)
+  filling_mode: "IOC"         # IOC (Exness/ICM) | FOK | RETURN — tuỳ broker
+  retry_on_requote: true      # Tự retry 1 lần nếu broker trả REQUOTE
+
 # ── Telegram ──────────────────────────────────────────────────────────────────
 # Bot gửi tín hiệu (HTML): Entry, SL (stop loss), TP1/TP2 (take profit), volume, risk.
 # Override bằng biến môi trường: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
