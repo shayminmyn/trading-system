@@ -162,11 +162,11 @@ class SonicRM5Strategy(SonicRStrategy):
         • SELL: sl_lvl = max(sl_lvl, entry + min_sl_pips × pip_size)
         0 = tắt.
         """
-        # if self._min_sl_pips <= 0:
-        #     return sl_lvl
-        # min_dist = self._min_sl_pips * self._pip_size()
-        # if direction == "BUY":
-        #     return min(sl_lvl, entry - min_dist)
-        # else:
-        #     return max(sl_lvl, entry + min_dist)
-        return sl_lvl + self._min_sl_pips * self._pip_size()
+        if self._min_sl_pips <= 0:
+            return sl_lvl
+        min_dist = self._min_sl_pips * self._pip_size()
+        if direction == "BUY":
+            return min(sl_lvl, entry - min_dist) + 2
+        else:
+            return max(sl_lvl, entry + min_dist) + 2
+        # return sl_lvl + self._min_sl_pips * self._pip_size()
