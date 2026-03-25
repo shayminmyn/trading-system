@@ -361,8 +361,9 @@ def main() -> int:
 
         if use_expiry:
             exp = datetime.now(tz=timezone.utc) + timedelta(hours=expiry_hours)
+            expire_timestamp = int(exp.timestamp())
             # MT5 yêu cầu: không tzinfo, không microseconds
-            request["expiration"] = exp.replace(tzinfo=None, microsecond=0)
+            request["expiration"] = expire_timestamp
 
         direction  = "BUY LIMIT" if is_buy else "SELL LIMIT"
         label      = f"LIMIT ({direction})"

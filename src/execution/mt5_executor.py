@@ -366,7 +366,8 @@ class MT5OrderExecutor:
         if use_expiry:
             exp = datetime.now(tz=timezone.utc) + timedelta(hours=actual_expiry)
             # MT5 yêu cầu: không tzinfo, không microseconds
-            request["expiration"] = exp.replace(tzinfo=None, microsecond=0)
+            expire_timestamp = int(exp.timestamp())
+            request["expiration"] = expire_timestamp
             logger.debug(
                 "Limit expiry %s %s: %.2fh → %s (base=%.2fh × scale=%.2f)",
                 signal.symbol, signal.timeframe,
