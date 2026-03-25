@@ -39,12 +39,13 @@ if TYPE_CHECKING:
 logger = get_logger("mt5_executor")
 
 # MT5 trade return codes (defined here so we don't import mt5 at module level)
-_RETCODE_DONE             = 10009   # mt5.TRADE_RETCODE_DONE
-_RETCODE_PLACED           = 10008   # mt5.TRADE_RETCODE_PLACED
-_RETCODE_CANCEL           = 10007   # mt5.TRADE_RETCODE_CANCEL — pending order removed
-_RETCODE_REQUOTE          = 10004   # mt5.TRADE_RETCODE_REQUOTE
-_RETCODE_AUTO_TRADING_OFF = 10027   # AutoTrading disabled by client
-_RETCODE_INVALID_ORDER    = 10006   # order not found (already closed/filled)
+_RETCODE_DONE              = 10009   # mt5.TRADE_RETCODE_DONE
+_RETCODE_PLACED            = 10008   # mt5.TRADE_RETCODE_PLACED
+_RETCODE_CANCEL            = 10007   # mt5.TRADE_RETCODE_CANCEL — pending order removed
+_RETCODE_REQUOTE           = 10004   # mt5.TRADE_RETCODE_REQUOTE
+_RETCODE_AUTO_TRADING_OFF  = 10027   # AutoTrading disabled by client
+_RETCODE_INVALID_ORDER     = 10006   # order not found (already closed/filled)
+_RETCODE_INVALID_EXPIRATION = 10022  # Incorrect order expiration date
 _RETCODE_OK_CANCEL = (_RETCODE_DONE, _RETCODE_CANCEL)  # acceptable retcodes for cancel
 
 _FILLING_MAP = {
@@ -347,33 +348,32 @@ class MT5OrderExecutor:
         order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
         actual_expiry = self._scaled_expiry_hours(signal.timeframe)
 
+        use_expiry = actual_expiry > 0
         request = {
             "action":       mt5.TRADE_ACTION_PENDING,
             "symbol":       signal.symbol,
             "volume":       float(signal.volume),
             "type":         order_type,
-            "price":        float(signal.entry),   # entry == limit_price (sau risk_manager fix)
+            "price":        float(signal.entry),
             "sl":           float(signal.sl),
             "tp":           float(signal.tp1),
             "deviation":    self._deviation,
             "magic":        self._magic,
             "comment":      comment,
-            "type_time":    (
-                mt5.ORDER_TIME_SPECIFIED if actual_expiry > 0
-                else mt5.ORDER_TIME_GTC
-            ),
+            "type_time":    mt5.ORDER_TIME_SPECIFIED if use_expiry else mt5.ORDER_TIME_GTC,
         }
 
-        # if actual_expiry > 0:
-        #     exp = datetime.now(tz=timezone.utc) + timedelta(hours=actual_expiry)
-        #     # MT5 yêu cầu: không có tzinfo, không có microseconds
-        #     request["expiration"] = exp.replace(tzinfo=None, microsecond=0)
-        #     logger.debug(
-        #         "Limit expiry for %s %s: %.2fh (base=%.2fh × scale=%.2f)",
-        #         signal.symbol, signal.timeframe,
-        #         actual_expiry, self._expiry_hours,
-        #         _TF_EXPIRY_SCALE.get(signal.timeframe.upper(), 1.0),
-        #     )
+        if use_expiry:
+            exp = datetime.now(tz=timezone.utc) + timedelta(hours=actual_expiry)
+            # MT5 yêu cầu: không tzinfo, không microseconds
+            request["expiration"] = exp.replace(tzinfo=None, microsecond=0)
+            logger.debug(
+                "Limit expiry %s %s: %.2fh → %s (base=%.2fh × scale=%.2f)",
+                signal.symbol, signal.timeframe,
+                actual_expiry, request["expiration"],
+                self._expiry_hours,
+                _TF_EXPIRY_SCALE.get(signal.timeframe.upper(), 1.0),
+            )
 
         return self._do_send(mt5, request, "LIMIT", signal, float(signal.entry))
 
@@ -401,6 +401,20 @@ class MT5OrderExecutor:
 
         if check.retcode != 0:
             msg = check.comment or f"retcode={check.retcode}"
+            # 10022: broker không hỗ trợ ORDER_TIME_SPECIFIED → fallback GTC (once)
+            if (
+                check.retcode == _RETCODE_INVALID_EXPIRATION
+                and not _retry
+                and "expiration" in request
+            ):
+                logger.warning(
+                    "MT5 order_check 10022 (invalid expiration) %s %s — "
+                    "broker không hỗ trợ SPECIFIED, retry với GTC",
+                    order_type, signal.symbol,
+                )
+                request.pop("expiration", None)
+                request["type_time"] = mt5.ORDER_TIME_GTC
+                return self._do_send(mt5, request, order_type, signal, requested_price, _retry=True)
             logger.error(
                 "MT5 order_check failed [%s] symbol=%s retcode=%d: %s",
                 order_type, signal.symbol, check.retcode, msg,

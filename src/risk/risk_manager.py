@@ -135,20 +135,66 @@ class RiskManager:
             # actual fill price so that SL pips, TP levels and lot size are correct.
             actual_entry = signal.limit_price if signal.limit_price > 0 else signal.entry
 
-            # Use exact sl_level from strategy when available (swing/ATR price),
-            # then derive sl_pips from the real price distance to avoid pip-size
-            # mismatch bugs (e.g. XAUUSDm strategy computed pips with wrong pip size).
+            is_buy = "BUY" in signal.action.upper()
+            pip_size = self._pip_size(signal.symbol)
+
+            # ── SL price ──────────────────────────────────────────────────────────
+            # Prefer exact sl_level from strategy (swing / ATR absolute price).
+            # For limit orders, sl_level was computed from bar close (signal.entry),
+            # but actual_entry = limit_price. When they differ the sl_level may land
+            # on the WRONG side of actual_entry — re-anchor, preserving the distance.
+            #
+            #   BUY / BUY LIMIT  → SL must be BELOW actual_entry
+            #   SELL / SELL LIMIT → SL must be ABOVE actual_entry
             if signal.sl_level > 0:
                 sl_price = signal.sl_level
-                effective_sl_pips = abs(actual_entry - sl_price) / self._pip_size(signal.symbol)
+
+                sl_on_wrong_side = (    is_buy and sl_price >= actual_entry) or \
+                                   (not is_buy and sl_price <= actual_entry)
+
+                if sl_on_wrong_side:
+                    sl_dist = abs(signal.entry - sl_price)   # preserve distance from bar close
+                    sl_price = (actual_entry - sl_dist) if is_buy else (actual_entry + sl_dist)
+                    logger.debug(
+                        "SL re-anchored [%s]: bar_entry=%.5f actual_entry=%.5f  "
+                        "sl_level=%.5f → sl_price=%.5f",
+                        signal.action, signal.entry, actual_entry,
+                        signal.sl_level, sl_price,
+                    )
+
+                effective_sl_pips = abs(actual_entry - sl_price) / pip_size
             else:
                 sl_price = self._calculate_sl_price(signal.action, actual_entry, signal.sl_pips, signal.symbol)
                 effective_sl_pips = signal.sl_pips
 
-            lot = self._calculate_lot(effective_sl_pips, pip_value, risk_usd)
+            # ── TP ────────────────────────────────────────────────────────────────
             tp1 = self._calculate_tp(signal.action, actual_entry, effective_sl_pips, signal.symbol, self._rr_ratio)
             tp2 = self._calculate_tp(signal.action, actual_entry, effective_sl_pips, signal.symbol, self._rr_ratio * 1.5)
 
+            # ── Final direction sanity check ──────────────────────────────────────
+            # Catch any residual mis-direction: log error + correct automatically.
+            sl_valid = (is_buy and sl_price < actual_entry) or (not is_buy and sl_price > actual_entry)
+            tp_valid = (is_buy and tp1 > actual_entry)     or (not is_buy and tp1 < actual_entry)
+            if not sl_valid:
+                logger.error(
+                    "SL direction WRONG after calc [%s]: entry=%.5f SL=%.5f — forcing correct side",
+                    signal.action, actual_entry, sl_price,
+                )
+                sl_dist = abs(actual_entry - sl_price) or pip_size
+                sl_price = (actual_entry - sl_dist) if is_buy else (actual_entry + sl_dist)
+                effective_sl_pips = sl_dist / pip_size
+                tp1 = self._calculate_tp(signal.action, actual_entry, effective_sl_pips, signal.symbol, self._rr_ratio)
+                tp2 = self._calculate_tp(signal.action, actual_entry, effective_sl_pips, signal.symbol, self._rr_ratio * 1.5)
+            if not tp_valid:
+                logger.error(
+                    "TP direction WRONG after calc [%s]: entry=%.5f TP=%.5f — forcing correct side",
+                    signal.action, actual_entry, tp1,
+                )
+                tp_dist = abs(actual_entry - tp1) or pip_size
+                tp1 = (actual_entry + tp_dist) if is_buy else (actual_entry - tp_dist)
+                tp2 = (actual_entry + tp_dist * 1.5) if is_buy else (actual_entry - tp_dist * 1.5)
+
+            lot = self._calculate_lot(effective_sl_pips, pip_value, risk_usd)
             action_str = f"{signal.action} LIMIT" if signal.limit_price > 0 else signal.action
 
             cs = CompleteSignal(
@@ -218,7 +264,7 @@ class RiskManager:
     ) -> float:
         pip_size = self._pip_size(symbol)
         sl_distance = sl_pips * pip_size
-        if action == "BUY":
+        if "BUY" in action.upper():
             return entry - sl_distance
         return entry + sl_distance
 
@@ -227,7 +273,7 @@ class RiskManager:
     ) -> float:
         pip_size = self._pip_size(symbol)
         tp_distance = sl_pips * pip_size * rr
-        if action == "BUY":
+        if "BUY" in action.upper():
             return entry + tp_distance
         return entry - tp_distance
 
@@ -237,15 +283,21 @@ class RiskManager:
         JPY pairs     : 0.01
         Standard Forex: 0.0001
         """
-        if symbol in ("XAUUSD", "XAUUSDm"):
+        s = symbol.upper()
+        if s.startswith("XAUUSD") or s.startswith("XAU_USD"):
             return 0.10
-        if "JPY" in symbol:
+        if s.startswith("XAGUSD"):
+            return 0.01
+        if "JPY" in s:
             return 0.01
         return 0.0001
 
     def _digits(self, symbol: str) -> int:
-        if symbol in ("XAUUSD", "XAUUSDm"):
+        s = symbol.upper()
+        if s.startswith("XAUUSD") or s.startswith("XAU_USD"):
             return 2   # e.g. 2150.50 — round to cents
-        if "JPY" in symbol:
+        if s.startswith("XAGUSD"):
+            return 3
+        if "JPY" in s:
             return 3
         return 5
