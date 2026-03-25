@@ -419,7 +419,8 @@ redis:
   db: 0
   password: null                # null hoặc chuỗi mật khẩu
   key_prefix: "trading:"        # prefix cho mọi key, phân tách môi trường
-  state_ttl_seconds: 604800     # TTL state (giây) — mặc định 7 ngày
+  state_ttl_seconds: 604800     # TTL paper state (giây) — mặc định 7 ngày
+  stats_ttl_seconds: 172800     # TTL daily stats (giây) — mặc định 2 ngày
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging:

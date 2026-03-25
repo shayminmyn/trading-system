@@ -33,7 +33,7 @@ from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrate
 from src.risk import RiskManager
 from src.notifier import TelegramNotifier
 from src.execution import MT5OrderExecutor, OrderResult
-from src.state import create_paper_store, PaperStateStore
+from src.state import create_paper_store, PaperStateStore, create_daily_stats_store, DailyStatsStore
 
 logger = get_logger("main", log_file="logs/trading.log")
 
@@ -189,27 +189,15 @@ def main() -> None:
     paper_store: PaperStateStore = create_paper_store(cfg.raw)
 
     # ── Daily stats ──────────────────────────────────────────────────────────
-    # key: (strategy_name, symbol, timeframe) → _TradeOutcome
-    _stats_lock = threading.Lock()
-    _daily_stats: dict[tuple[str, str, str], _TradeOutcome] = defaultdict(
-        lambda: _TradeOutcome()
-    )
+    # Persistent khi Redis enabled, fallback in-memory khi không có Redis.
+    _daily_stats_store: DailyStatsStore = create_daily_stats_store(cfg.raw)
 
     def _record_outcome(strategy: str, symbol: str, timeframe: str, outcome: str) -> None:
         """Thread-safe; outcome = 'tp' | 'sl' | 'expired'."""
-        key = (strategy, symbol, timeframe)
-        with _stats_lock:
-            obj = _daily_stats[key]
-            if outcome == "tp":
-                obj.tp += 1
-            elif outcome == "sl":
-                obj.sl += 1
-            elif outcome == "expired":
-                obj.expired += 1
+        _daily_stats_store.increment(strategy, symbol, timeframe, outcome)
 
     def _reset_daily_stats() -> None:
-        with _stats_lock:
-            _daily_stats.clear()
+        _daily_stats_store.reset()
 
     data_cfg = cfg.raw.get("data", {}) or {}
     strat_log_every = max(0, int(data_cfg.get("strategy_eval_log_every_n", 20)))
@@ -713,8 +701,11 @@ def main() -> None:
             if stop_event.is_set():
                 break
             # Đủ giờ → snapshot + reset + send
-            with _stats_lock:
-                snapshot = {k: _TradeOutcome(v.tp, v.sl, v.expired) for k, v in _daily_stats.items()}
+            raw_snapshot = _daily_stats_store.get_all()
+            snapshot = {
+                k: _TradeOutcome(v["tp"], v["sl"], v["expired"])
+                for k, v in raw_snapshot.items()
+            }
             _reset_daily_stats()
             text = _build_daily_summary_text(snapshot)
             logger_main.info("daily_summary: sending\n%s", text)
