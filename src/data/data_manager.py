@@ -103,8 +103,18 @@ class DataManager:
     def register_callback(
         self, symbol: str, timeframe: str, callback: BarCallback
     ) -> None:
-        """Register a function to call on every new closed bar."""
+        """Register a function to call on every new closed bar.
+
+        Deduplicates: same callback object on the same (symbol, timeframe) key
+        is never added twice.
+        """
         key = (symbol, timeframe)
+        if callback in self._callbacks[key]:
+            logger.debug(
+                "register_callback: skipped duplicate %s for %s %s",
+                callback.__qualname__, symbol, timeframe,
+            )
+            return
         self._callbacks[key].append(callback)
         logger.debug("Registered callback for %s %s: %s", symbol, timeframe, callback.__qualname__)
 
@@ -120,9 +130,17 @@ class DataManager:
         self._connector = self._build_connector()
 
         trading_pairs = self._config.get("trading_pairs", [])
+        _started_streams: set[tuple[str, str]] = set()
         for pair in trading_pairs:
             symbol = pair["symbol"]
             for tf in pair.get("timeframes", []):
+                if (symbol, tf) in _started_streams:
+                    logger.warning(
+                        "DataManager.start: duplicate stream (symbol=%s tf=%s) — skipped",
+                        symbol, tf,
+                    )
+                    continue
+                _started_streams.add((symbol, tf))
                 self._init_data(symbol, tf)
                 t = threading.Thread(
                     target=self._stream_loop,

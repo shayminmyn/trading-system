@@ -184,6 +184,26 @@ def main() -> None:
     _first_sig_lock = threading.Lock()
     _first_sig_sent = False
     paper_lock = threading.Lock()
+
+    # ── Signal dedup (safety net) ─────────────────────────────────────────────
+    # Loại bỏ duplicate order_id trong vòng 60 giây để tránh gửi 2 lần do
+    # callback bị fire đôi khi có race condition hoặc config lỗi.
+    _seen_order_ids: dict[str, float] = {}   # order_id → time.monotonic()
+    _seen_order_ids_lock = threading.Lock()
+    _DEDUP_WINDOW_SEC = 60.0
+
+    def _is_duplicate_order_id(oid: str) -> bool:
+        import time
+        now = time.monotonic()
+        with _seen_order_ids_lock:
+            # Dọn các entry cũ
+            expired = [k for k, t in _seen_order_ids.items() if now - t > _DEDUP_WINDOW_SEC]
+            for k in expired:
+                del _seen_order_ids[k]
+            if oid in _seen_order_ids:
+                return True
+            _seen_order_ids[oid] = now
+            return False
     # Keyed by (symbol, timeframe) so each pair tracks independently.
     # Backend: RedisStateStore (if configured) or InMemoryStateStore (default).
     paper_store: PaperStateStore = create_paper_store(cfg.raw)
@@ -640,6 +660,13 @@ def main() -> None:
             risk_override = float(strat_risk) if strat_risk is not None else None
             complete = risk_manager.build_complete_signal(sig, risk_pct_override=risk_override)
             if complete:
+                # Safety-net: bỏ qua nếu cùng order_id đã xử lý trong 60s
+                if _is_duplicate_order_id(complete.order_id):
+                    logger_main.warning(
+                        "DUPLICATE signal ignored: order_id=%s strategy=%s %s/%s",
+                        complete.order_id, strategy.name, symbol, timeframe,
+                    )
+                    return
                 notifier.send_signal(complete)
                 _register_paper(complete, sig)
                 mt5_executor.submit_signal(complete)
