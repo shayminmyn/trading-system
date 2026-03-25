@@ -226,7 +226,7 @@ def main() -> None:
         symbol: str, timeframe: str, st: dict, h: float, l: float, ts_str: str
     ) -> None:
         """Kiểm tra và xử lý TP/SL cho một vị thế OPEN. Gọi từ cả M1 lẫn TF gốc."""
-        key = (symbol, timeframe)
+        key = (symbol, timeframe, st.get("order_id", ""))
         outcome = paper_bar_exit(st["is_buy"], h, l, st["sl"], st["tp"])
         if outcome is None:
             return
