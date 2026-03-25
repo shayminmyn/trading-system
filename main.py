@@ -406,7 +406,7 @@ def main() -> None:
         """
         Check paper position mỗi khi nến TF chiến lược đóng.
 
-        State machine (per symbol+timeframe slot):
+        State machine (per order slot):
           PENDING → check fill (BUY: low <= limit, SELL: high >= limit)
                   → if filled: transition to OPEN
                   → if bars_remaining == 0: EXPIRED → clear state
@@ -415,12 +415,14 @@ def main() -> None:
         """
         if not paper_track_tp_sl:
             return
-        key = (symbol, timeframe)
         with paper_lock:
-            slot = paper_store.get(key)
-            if slot is None:
-                return
-            st = dict(slot)
+            # Key format: (symbol, timeframe, order_id) — collect all slots for this pair
+            slots = [(k, dict(v)) for k, v in paper_store.items()
+                     if k[0] == symbol and k[1] == timeframe]
+        if not slots:
+            return
+        # Use the first slot for backward-compatible fallback logic below
+        key, st = slots[0]
 
         if df is None or len(df) < 1:
             return
@@ -437,18 +439,19 @@ def main() -> None:
 
     def _register_paper(complete, sig=None) -> None:
         """
-        Register a new paper position for (symbol, timeframe).
+        Register a new paper position.
 
-        Each (symbol, timeframe) pair has its own independent slot.
+        Key = (symbol, timeframe, order_id) — supports multiple concurrent
+        positions on the same symbol+timeframe pair.
         Limit orders: stored as PENDING, waiting for fill.
         Market orders: stored as OPEN immediately.
         """
         if not paper_track_tp_sl:
             return
-        key = (complete.symbol, complete.timeframe)
+        key = (complete.symbol, complete.timeframe, complete.order_id)
         with paper_lock:
             if paper_store.get(key) is not None:
-                return
+                return   # exact duplicate order_id — skip
             is_buy   = "BUY"   in complete.action.upper()
             is_limit = "LIMIT" in complete.action.upper()
 
