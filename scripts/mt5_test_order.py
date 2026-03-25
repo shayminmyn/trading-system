@@ -86,8 +86,8 @@ def _build_comment(prefix: str, order_id: str) -> str:
     """Giống logic mt5_executor._execute: '{prefix} {order_id}'[:31]"""
     max_oid = 31 - len(prefix) - 1
     if order_id:
-        return f"{prefix} {order_id[:max_oid]}"
-    return prefix[:31]
+        return f"{order_id[:max_oid]}"[:31]
+    return f"{prefix[:31]}"[:31]
 
 
 def _send_and_check(mt5, request: dict, dry_run: bool, label: str) -> int:

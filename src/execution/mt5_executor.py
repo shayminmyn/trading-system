@@ -248,10 +248,10 @@ class MT5OrderExecutor:
         oid = getattr(signal, "order_id", "") or ""
         max_oid_len = 31 - len(self._comment_prefix) - 1   # 1 cho dấu cách
         if oid:
-            comment = f"{self._comment_prefix} {oid[:max_oid_len]}"
+            comment = f"{oid[:max_oid_len]}"[:31]
         else:
             strat_short = signal.strategy_name.replace("Strategy", "").replace("Strat", "")
-            comment = f"{self._comment_prefix} {strat_short}"[:31]
+            comment = f"{strat_short}"[:31]
 
         if is_limit:
             return self._send_limit(mt5, signal, is_buy, comment)
