@@ -1450,6 +1450,41 @@ class SonicRStrategy(BaseStrategy):
         else:
             return max(sl_lvl, entry + min_dist)
 
+    def _make_signal(
+        self,
+        action: str,
+        entry: float,
+        sl_pips: float,
+        notes: str = "",
+        limit_price: float = 0.0,
+        limit_expiry_bars: int = 0,
+        sl_level: float = 0.0,
+        **kwargs,
+    ):
+        """
+        Override _make_signal để re-apply min_sl_pips against limit_price.
+
+        Strategy gọi _enforce_min_sl với bar close (entry), nhưng khi là limit
+        order thì actual fill = limit_price (khác bar close). SL thoả mãn min_sl
+        từ bar close có thể vi phạm min_sl từ limit_price. Re-enforce ở đây để
+        đảm bảo sl_level luôn đủ xa limit_price.
+        """
+        anchor = limit_price if limit_price > 0 else entry
+        if anchor != entry and sl_level > 0 and self._min_sl_pips > 0:
+            direction = "BUY" if "BUY" in action.upper() else "SELL"
+            sl_level_enforced = self._enforce_min_sl(sl_level, anchor, direction)
+            if sl_level_enforced != sl_level:
+                logger.debug(
+                    "min_sl re-enforce vs limit_price: sl=%.5f → %.5f  "
+                    "(anchor=%.5f min_sl=%.0f pips) [%s]",
+                    sl_level, sl_level_enforced, anchor, self._min_sl_pips, action,
+                )
+                sl_level = sl_level_enforced
+        return super()._make_signal(
+            action, entry, sl_pips, notes,
+            limit_price, limit_expiry_bars, sl_level, **kwargs,
+        )
+
     # ── Opt-9: Time / Session Filter ─────────────────────────────────────────
 
     def _is_trade_hour_ok(self, curr: pd.Series) -> bool:

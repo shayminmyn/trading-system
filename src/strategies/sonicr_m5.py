@@ -153,20 +153,3 @@ class SonicRM5Strategy(SonicRStrategy):
     ) -> None:
         # merged = {**self._M5_DEFAULTS, **(parameters or {})}
         super().__init__(symbol, timeframe, parameters)
-
-    def _enforce_min_sl(self, sl_lvl: float, entry: float, direction: str) -> float:
-        """
-        Đảm bảo SL rộng ít nhất min_sl_pips. Nếu SL tính được hẹp hơn, kéo
-        sl_lvl ra xa entry đến đúng min_sl_pips.
-        • BUY : sl_lvl = min(sl_lvl, entry − min_sl_pips × pip_size)
-        • SELL: sl_lvl = max(sl_lvl, entry + min_sl_pips × pip_size)
-        0 = tắt.
-        """
-        if self._min_sl_pips <= 0:
-            return sl_lvl
-        min_dist = self._min_sl_pips * self._pip_size()
-        if direction == "BUY":
-            return min(sl_lvl, entry - min_dist) + 2
-        else:
-            return max(sl_lvl, entry + min_dist) + 2
-        # return sl_lvl + self._min_sl_pips * self._pip_size()
