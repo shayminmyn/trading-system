@@ -18,8 +18,8 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
-# Kiểu key: (symbol, timeframe) ví dụ ("XAUUSD", "M5")
-StateKey = tuple[str, str]
+# Kiểu key: (symbol, timeframe, order_id) ví dụ ("XAUUSDm", "M1", "XAUUSDM-M1-20260325-0903")
+StateKey = tuple[str, str, str]
 
 
 class PaperStateStore(ABC):
@@ -69,9 +69,10 @@ class InMemoryStateStore(PaperStateStore):
 class RedisStateStore(PaperStateStore):
     """
     Lưu state vào Redis dưới dạng JSON.
-    Key Redis: ``{prefix}paper:{symbol}:{timeframe}``
+    Key Redis: ``{prefix}paper:{symbol}:{timeframe}:{order_id}``
 
-    Khi khởi động, tự động log các state còn tồn tại (phục hồi sau restart).
+    Mỗi lệnh có Redis key riêng — hỗ trợ nhiều lệnh đồng thời trên cùng pair.
+    Khi khởi động, tự động phục hồi các state còn sống trong Redis.
     """
 
     def __init__(
@@ -106,12 +107,18 @@ class RedisStateStore(PaperStateStore):
     # ── internal helpers ──────────────────────────────────────────────────────
 
     def _rkey(self, key: StateKey) -> str:
-        return f"{self._prefix}{key[0]}:{key[1]}"
+        # Format: {prefix}paper:{symbol}:{timeframe}:{order_id}
+        # order_id có thể chứa "-" nên dùng ":" để phân tách 3 phần đầu
+        return f"{self._prefix}{key[0]}:{key[1]}:{key[2]}"
 
     def _parse_rkey(self, rkey: str) -> StateKey | None:
         suffix = rkey[len(self._prefix):]
-        parts = suffix.split(":", 1)
-        return (parts[0], parts[1]) if len(parts) == 2 else None
+        # split tối đa 2 lần → (symbol, timeframe, order_id)
+        parts = suffix.split(":", 2)
+        if len(parts) == 3:
+            return (parts[0], parts[1], parts[2])
+        # fallback: key cũ format 2 phần (symbol:timeframe) — bỏ qua
+        return None
 
     def _log_restored(self) -> None:
         existing = self.items()
@@ -122,7 +129,7 @@ class RedisStateStore(PaperStateStore):
         for k, v in existing:
             logger.info(
                 "  ↳ %s/%s  status=%-7s  order_id=%s",
-                k[0], k[1], v.get("status", "?"), v.get("order_id", "—"),
+                k[0], k[1], v.get("status", "?"), k[2],
             )
 
     # ── interface ─────────────────────────────────────────────────────────────
