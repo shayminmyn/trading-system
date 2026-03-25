@@ -117,10 +117,17 @@ class RiskManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def build_complete_signal(self, signal: Signal) -> CompleteSignal | None:
+    def build_complete_signal(
+        self,
+        signal: Signal,
+        risk_pct_override: float | None = None,
+    ) -> CompleteSignal | None:
         """
         Convert a raw strategy Signal to a CompleteSignal with calculated
         lot size, SL price, and TP levels.
+
+        ``risk_pct_override`` — nếu truyền vào (per-strategy config), dùng giá
+        trị này thay cho ``risk_per_trade_percent`` toàn cục.
         Returns None if signal is not actionable or calculation fails.
         """
         if not signal.is_actionable():
@@ -128,7 +135,8 @@ class RiskManager:
 
         try:
             pip_value = self._get_pip_value(signal.symbol)
-            risk_usd = self._balance * self._risk_pct / 100.0
+            risk_pct  = risk_pct_override if risk_pct_override is not None else self._risk_pct
+            risk_usd  = self._balance * risk_pct / 100.0
 
             # For limit orders the fill price is limit_price, not the close of the
             # signal bar.  All risk calculations (SL distance, lot, TP) must use the
@@ -207,7 +215,7 @@ class RiskManager:
                 tp1=round(tp1, self._digits(signal.symbol)),
                 tp2=round(tp2, self._digits(signal.symbol)),
                 volume=lot,
-                risk_percent=self._risk_pct,
+                risk_percent=risk_pct,
                 risk_amount_usd=round(risk_usd, 2),
                 rr_ratio=self._rr_ratio,
                 strategy_name=signal.strategy_name,

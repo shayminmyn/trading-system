@@ -319,10 +319,11 @@ def main() -> None:
                         filled, fill_price = True, lim
 
                 if filled:
-                    sl_dist  = abs(fill_price - sl_level) if sl_level > 0 else abs(fill_price - st["sl"])
-                    tp_dist  = sl_dist * rr_ratio
-                    sl_price = (fill_price - sl_dist) if is_buy else (fill_price + sl_dist)
-                    tp_price = (fill_price + tp_dist) if is_buy else (fill_price - tp_dist)
+                    # Giữ nguyên SL/TP đã tính sẵn từ limit_price (risk manager),
+                    # chỉ cập nhật entry = fill_price thực tế.
+                    # Tránh tính lại TP từ fill_price (khác limit_price → TP lệch).
+                    sl_price = float(st["sl"])
+                    tp_price = float(st["tp"])
                     with paper_lock:
                         if paper_store.get(key) is None:
                             continue
@@ -597,7 +598,11 @@ def main() -> None:
             actionable,
         )
         if sig and sig.is_actionable():
-            complete = risk_manager.build_complete_signal(sig)
+            # Per-strategy risk override: strategies.<Name>.risk_per_trade_percent
+            strat_cfg = cfg.raw.get("strategies", {}).get(strategy.name, {}) or {}
+            strat_risk = strat_cfg.get("risk_per_trade_percent")
+            risk_override = float(strat_risk) if strat_risk is not None else None
+            complete = risk_manager.build_complete_signal(sig, risk_pct_override=risk_override)
             if complete:
                 notifier.send_signal(complete)
                 _register_paper(complete, sig)

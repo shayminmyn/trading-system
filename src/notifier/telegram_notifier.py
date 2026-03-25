@@ -29,19 +29,23 @@ logger = get_logger("telegram_notifier")
 
 def _pip_size(symbol: str) -> float:
     """1 pip in price units (same convention as RiskManager)."""
-    sym = symbol.upper()
-    if sym in ("XAUUSD", "XAUUSDm"):
+    s = symbol.upper()
+    if s.startswith("XAUUSD") or s.startswith("XAU_USD"):
         return 0.10
-    if "JPY" in sym:
+    if s.startswith("XAGUSD"):
+        return 0.01
+    if "JPY" in s:
         return 0.01
     return 0.0001
 
 
 def _price_fmt(symbol: str, price: float) -> str:
-    sym = symbol.upper()
-    if sym in ("XAUUSD", "XAUUSDm"):
+    s = symbol.upper()
+    if s.startswith("XAUUSD") or s.startswith("XAU_USD"):
         return f"{price:.2f}"
-    if "JPY" in sym:
+    if s.startswith("XAGUSD"):
+        return f"{price:.3f}"
+    if "JPY" in s:
         return f"{price:.3f}"
     return f"{price:.5f}"
 
