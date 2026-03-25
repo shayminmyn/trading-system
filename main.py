@@ -292,8 +292,55 @@ def main() -> None:
                 is_buy   = st["is_buy"]
                 sl_level = float(st.get("sl_level", 0.0))
                 rr_ratio = float(st.get("rr_ratio", 2.0))
+                tp_level = float(st.get("tp", 0.0))
 
-                # Fill check on M1 bar
+                # ── Bỏ qua nến M1 ngay sau khi đặt lệnh (nến tạo signal) ────────
+                if st.get("skip_next_bar"):
+                    with paper_lock:
+                        if paper_store.get(key) is not None:
+                            paper_store.set(key, {**st, "skip_next_bar": False})
+                    continue
+
+                # ── Huỷ nếu giá đã vượt TP mà chưa fill ─────────────────────────
+                # BUY LIMIT : chờ giá xuống fill; nếu giá vọt LÊN qua TP → huỷ
+                # SELL LIMIT: chờ giá lên fill;  nếu giá rơi XUỐNG qua TP → huỷ
+                tp_invalidated = tp_level > 0 and (
+                    (    is_buy and h >= tp_level and l > lim) or
+                    (not is_buy and l <= tp_level and h < lim)
+                )
+                if tp_invalidated:
+                    with paper_lock:
+                        paper_store.set(key, None)
+                    oid    = st.get("order_id", "")
+                    ticket = int(st.get("mt5_ticket", 0))
+                    logger_main.info(
+                        "paper_track(M1): PENDING cancelled — price passed TP "
+                        "%s %s lim=%.5f tp=%.5f order_id=%s",
+                        key[0], key[1], lim, tp_level, oid,
+                    )
+                    if ticket > 0:
+                        mt5_executor.cancel_order_async(ticket, oid)
+                    _record_outcome(st.get("strategy", ""), st["symbol"], st["timeframe"], "expired")
+                    if notify_on_limit_expire:
+                        direction = "📈 BUY" if is_buy else "📉 SELL"
+                        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
+                        ticket_line = (
+                            f"\n🎫 ticket=<code>{ticket}</code> — đang huỷ trên MT5..."
+                            if ticket > 0 else ""
+                        )
+                        notifier.send_text(
+                            f"🚫 <b>Limit Invalidated (paper)</b>\n"
+                            f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}  {direction}\n"
+                            f"📍 Limit <code>{lim:.5f}</code> — giá đã vượt TP "
+                            f"<code>{tp_level:.5f}</code> mà chưa fill\n"
+                            f"🤖 {st['strategy']}"
+                            f"{oid_line}"
+                            f"{ticket_line}\n"
+                            f"🕐 <i>{ts_str}</i>"
+                        )
+                    continue
+
+                # ── Fill check on M1 bar ───────────────────────────────────────
                 filled, fill_price = False, lim
                 if is_buy:
                     if o <= lim:
@@ -467,6 +514,7 @@ def main() -> None:
                     "notes":             complete.notes or "",
                     "order_id":          complete.order_id,
                     "mt5_ticket":        0,
+                    "skip_next_bar":     True,  # bỏ qua nến M1 đầu tiên sau signal
                 })
                 logger_main.info(
                     "paper_track: PENDING %s %s %s limit=%.5f sl=%.5f tp=%.5f expiry=%d bars (%dm)",
