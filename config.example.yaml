@@ -350,6 +350,61 @@ strategies:
     breakeven_at_r: 1.0                # dời SL về entry khi đạt +1R
     min_rr: 1.5
 
+  # ── TrendLine3: Trendline 3-Point Touch ─────────────────────────────────────
+  # Vào lệnh tại lần chạm thứ 3 của đường trendline 2 điểm.
+  # SELL: nối 2 swing high (P1 > P2 → downtrend) → SELL khi chạm lần 3
+  # BUY : nối 2 swing low  (P1 < P2 → uptrend)  → BUY  khi chạm lần 3
+  TrendLine3:
+    # ── Timeframe & Symbol restriction ───────────────────────────────────────
+    # Ví dụ: chạy trên M15 và H1; để trống = tất cả timeframe được cấu hình
+    # allowed_timeframes: ["M15", "H1"]
+    # allowed_symbols: ["XAUUSDm"]
+
+    # ── Concurrent trade limit ────────────────────────────────────────────────
+    max_concurrent_trades: 1           # tối đa 1 lệnh đồng thời
+    signal_ttl_bars: 100               # live slot TTL = 100 bars
+
+    # ── Swing detection ───────────────────────────────────────────────────────
+    swing_lookback: 5                  # số nến mỗi bên để xác nhận swing high/low
+    swing_history_bars: 300            # chỉ tìm swing trong 300 nến gần nhất (0 = không giới hạn)
+    min_bars_between_peaks: 15         # P1 → P2 phải cách nhau ≥ 15 nến
+    min_bars_after_p2: 5               # P2 → P3 phải cách nhau ≥ 5 nến
+
+    # ── Touch detection ───────────────────────────────────────────────────────
+    touch_tolerance_atr: 0.5           # high phải trong ±0.5×ATR quanh trendline
+    touch_count_min: 1                 # bắt đầu vào từ lần chạm thứ 1 sau P2 (= lần 3 total)
+    touch_count_max: 2                 # dừng vào ở lần chạm thứ 3+ sau P2 (quá nhiều → yếu)
+
+    # ── Slope filter ─────────────────────────────────────────────────────────
+    min_slope_deg: 5.0                 # góc tối thiểu (độ) — loại trendline nằm ngang
+    max_slope_deg: 55.0                # góc tối đa (độ) — loại trendline gần thẳng đứng
+
+    # ── Candle filters ────────────────────────────────────────────────────────
+    require_bearish_candle: true       # P3 phải là nến đỏ (SELL) / xanh (BUY)
+    require_wick_rejection: false      # bật để đòi hỏi thêm râu từ chối
+    wick_ratio: 0.4                    # râu từ chối ≥ 40% phạm vi nến
+    max_approach_body_ratio: 0.85      # bỏ qua nếu nến tiếp cận là Marubozu > 85%
+
+    # ── Directions ───────────────────────────────────────────────────────────
+    enable_sell: true                  # tín hiệu SELL (downtrend trendline)
+    enable_buy: true                   # tín hiệu BUY  (uptrend trendline)
+
+    # ── Risk / SL / TP ───────────────────────────────────────────────────────
+    sl_buffer_atr: 0.3                 # SL = P1 ± 0.3×ATR (buffer tránh bị quét)
+    min_rr: 2.0                        # R:R tối thiểu (risk_manager sẽ tính TP = entry ± risk×min_rr)
+    max_sl_pips: 0                     # 0 = không giới hạn
+    atr_period: 14
+
+    # ── Entry ─────────────────────────────────────────────────────────────────
+    limit_entry: true                  # dùng SELL/BUY LIMIT tại trendline
+    limit_expiry_bars: 5               # huỷ limit nếu không fill sau 5 nến
+
+    # ── Trailing / Partial ────────────────────────────────────────────────────
+    breakeven_at_r: 1.0                # dời SL về entry khi đạt +1R
+    partial_close_at_r: 0.0            # 0 = tắt partial close
+    partial_close_ratio: 0.5
+    partial_trail_pips: 10.0
+
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:
   historical_dir: "data/historical"

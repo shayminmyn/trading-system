@@ -195,6 +195,71 @@ class MT5OrderExecutor:
         except queue.Full:
             logger.warning("MT5 executor queue full — cancel dropped: ticket=%d", ticket)
 
+    def modify_sl_async(
+        self,
+        ticket: int,
+        symbol: str,
+        new_sl: float,
+        new_tp: float = 0.0,
+        order_id: str = "",
+    ) -> None:
+        """
+        Enqueue lệnh dời SL (và tuỳ chọn TP) cho một vị thế đang mở.
+        Dùng khi paper track kích hoạt Break-even.
+        Non-blocking — an toàn từ bất kỳ thread.
+        """
+        if not self._enabled:
+            return
+        cmd = {
+            "_cmd":    "MODIFY_SL",
+            "ticket":  ticket,
+            "symbol":  symbol,
+            "new_sl":  new_sl,
+            "new_tp":  new_tp,   # 0 = giữ nguyên TP cũ
+            "order_id": order_id,
+        }
+        try:
+            self._queue.put_nowait(cmd)
+            logger.debug(
+                "Modify SL enqueued: ticket=%d symbol=%s new_sl=%.5f order_id=%s",
+                ticket, symbol, new_sl, order_id,
+            )
+        except queue.Full:
+            logger.warning("MT5 executor queue full — modify_sl dropped: ticket=%d", ticket)
+
+    def close_partial_async(
+        self,
+        ticket: int,
+        symbol: str,
+        volume: float,
+        is_buy: bool,
+        order_id: str = "",
+    ) -> None:
+        """
+        Enqueue lệnh partial close một vị thế.
+        volume = khối lượng muốn đóng (phần).
+        Gửi lệnh ngược chiều (BUY position → SELL, SELL position → BUY).
+        Non-blocking — an toàn từ bất kỳ thread.
+        """
+        if not self._enabled:
+            return
+        cmd = {
+            "_cmd":    "PARTIAL_CLOSE",
+            "ticket":  ticket,
+            "symbol":  symbol,
+            "volume":  volume,
+            "is_buy":  is_buy,   # True = đang giữ BUY position
+            "order_id": order_id,
+        }
+        try:
+            self._queue.put_nowait(cmd)
+            logger.debug(
+                "Partial close enqueued: ticket=%d symbol=%s vol=%.2f is_buy=%s order_id=%s",
+                ticket, symbol, volume, is_buy, order_id,
+            )
+        except queue.Full:
+            logger.warning("MT5 executor queue full — partial_close dropped: ticket=%d", ticket)
+
     @property
     def is_enabled(self) -> bool:
         return self._enabled
@@ -215,8 +280,13 @@ class MT5OrderExecutor:
         while not self._stop_event.is_set():
             try:
                 item = self._queue.get(timeout=1.0)
-                if isinstance(item, dict) and item.get("_cmd") == "CANCEL":
+                cmd = item.get("_cmd") if isinstance(item, dict) else None
+                if cmd == "CANCEL":
                     result = self._execute_cancel(item["ticket"], item.get("order_id", ""))
+                elif cmd == "MODIFY_SL":
+                    result = self._execute_modify_sl(item)
+                elif cmd == "PARTIAL_CLOSE":
+                    result = self._execute_partial_close(item)
                 else:
                     result = self._execute(item)
                 self._queue.task_done()
@@ -510,6 +580,172 @@ class MT5OrderExecutor:
             strategy_name=signal.strategy_name,
             order_id=getattr(signal, "order_id", ""),
         )
+
+    def _execute_modify_sl(self, cmd: dict) -> OrderResult:
+        """
+        Dời SL (và tuỳ chọn TP) cho vị thế đang mở — TRADE_ACTION_SLTP.
+
+        Nếu new_tp == 0 thì giữ nguyên TP hiện tại lấy từ positions_get().
+        Tạo OrderResult giả với type "MODIFY_SL" để callback có thể log.
+        """
+        mt5 = getattr(self._connector, "_mt5", None)
+        ticket   = int(cmd["ticket"])
+        symbol   = cmd["symbol"]
+        new_sl   = float(cmd["new_sl"])
+        new_tp   = float(cmd.get("new_tp", 0.0))
+        order_id = cmd.get("order_id", "")
+
+        _dummy = OrderResult(
+            success=False, order_type="MODIFY_SL", symbol=symbol,
+            action="MODIFY_SL", volume=0, price=0, sl=new_sl, tp=new_tp,
+            ticket=ticket, order_id=order_id,
+        )
+
+        if mt5 is None or not self._connector.is_connected():
+            logger.error("MT5 modify_sl: connector not available ticket=%d", ticket)
+            _dummy.error_msg = "MT5 not connected"
+            _dummy.error_code = -1
+            return _dummy
+
+        # Lấy TP hiện tại nếu new_tp == 0
+        if new_tp == 0.0:
+            positions = mt5.positions_get(ticket=ticket)
+            if positions:
+                new_tp = float(positions[0].tp)
+
+        request = {
+            "action":   mt5.TRADE_ACTION_SLTP,
+            "symbol":   symbol,
+            "sl":       new_sl,
+            "tp":       new_tp,
+            "position": ticket,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            err_code, err_msg = mt5.last_error()
+            logger.error(
+                "MT5 modify_sl FAILED ticket=%d symbol=%s new_sl=%.5f: (%d) %s",
+                ticket, symbol, new_sl, err_code, err_msg,
+            )
+            _dummy.error_code = err_code
+            _dummy.error_msg = err_msg
+            return _dummy
+
+        if result.retcode not in (_RETCODE_DONE, _RETCODE_PLACED):
+            logger.error(
+                "MT5 modify_sl retcode=%d ticket=%d symbol=%s: %s",
+                result.retcode, ticket, symbol, result.comment,
+            )
+            _dummy.error_code = result.retcode
+            _dummy.error_msg  = result.comment or f"retcode={result.retcode}"
+            return _dummy
+
+        logger.info(
+            "MT5 modify_sl OK ticket=%d symbol=%s new_sl=%.5f new_tp=%.5f order_id=%s",
+            ticket, symbol, new_sl, new_tp, order_id,
+        )
+        _dummy.success = True
+        return _dummy
+
+    def _execute_partial_close(self, cmd: dict) -> OrderResult:
+        """
+        Đóng một phần vị thế — TRADE_ACTION_DEAL với volume nhỏ hơn.
+
+        Gửi lệnh ngược chiều vị thế:
+          BUY position (is_buy=True)  → SELL volume
+          SELL position (is_buy=False) → BUY  volume
+        """
+        mt5 = getattr(self._connector, "_mt5", None)
+        ticket   = int(cmd["ticket"])
+        symbol   = cmd["symbol"]
+        volume   = float(cmd["volume"])
+        is_buy   = bool(cmd["is_buy"])
+        order_id = cmd.get("order_id", "")
+
+        _dummy = OrderResult(
+            success=False, order_type="PARTIAL_CLOSE", symbol=symbol,
+            action="PARTIAL_CLOSE", volume=volume, price=0, sl=0, tp=0,
+            ticket=ticket, order_id=order_id,
+        )
+
+        if mt5 is None or not self._connector.is_connected():
+            logger.error("MT5 partial_close: connector not available ticket=%d", ticket)
+            _dummy.error_msg = "MT5 not connected"
+            _dummy.error_code = -1
+            return _dummy
+
+        # Kiểm tra vị thế tồn tại
+        positions = mt5.positions_get(ticket=ticket)
+        if not positions:
+            logger.warning(
+                "MT5 partial_close: position ticket=%d not found — skip",
+                ticket,
+            )
+            _dummy.error_msg = f"position {ticket} not found"
+            return _dummy
+
+        pos = positions[0]
+        # Đảm bảo không close nhiều hơn volume hiện có
+        volume = min(volume, float(pos.volume))
+        if volume <= 0:
+            logger.warning("MT5 partial_close: volume=0 after clamp, skip ticket=%d", ticket)
+            return _dummy
+
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            err_code, err_msg = mt5.last_error()
+            logger.error("MT5 partial_close: no tick for %s: (%d) %s", symbol, err_code, err_msg)
+            _dummy.error_code = err_code
+            _dummy.error_msg = err_msg
+            return _dummy
+
+        # Ngược chiều: BUY position → đóng bằng SELL, SELL position → đóng bằng BUY
+        order_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+        price      = tick.bid if is_buy else tick.ask
+
+        max_oid_len = 31
+        comment = order_id[:max_oid_len] if order_id else f"partial"
+
+        request = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "symbol":       symbol,
+            "volume":       volume,
+            "type":         order_type,
+            "position":     ticket,
+            "price":        price,
+            "deviation":    self._deviation,
+            "magic":        self._magic,
+            "comment":      comment,
+            "type_time":    mt5.ORDER_TIME_GTC,
+            "type_filling": self._filling,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            err_code, err_msg = mt5.last_error()
+            logger.error(
+                "MT5 partial_close FAILED ticket=%d symbol=%s vol=%.2f: (%d) %s",
+                ticket, symbol, volume, err_code, err_msg,
+            )
+            _dummy.error_code = err_code
+            _dummy.error_msg = err_msg
+            return _dummy
+
+        if result.retcode not in (_RETCODE_DONE, _RETCODE_PLACED):
+            logger.error(
+                "MT5 partial_close retcode=%d ticket=%d symbol=%s: %s",
+                result.retcode, ticket, symbol, result.comment,
+            )
+            _dummy.error_code = result.retcode
+            _dummy.error_msg  = result.comment or f"retcode={result.retcode}"
+            return _dummy
+
+        logger.info(
+            "MT5 partial_close OK ticket=%d symbol=%s vol=%.2f price=%.5f order_id=%s",
+            ticket, symbol, volume, result.price or price, order_id,
+        )
+        _dummy.success = True
+        _dummy.price   = result.price or price
+        return _dummy
 
     def _execute_cancel(self, ticket: int, order_id: str) -> OrderResult:
         """

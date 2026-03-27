@@ -29,7 +29,7 @@ from src.utils import get_logger, ConfigLoader, print_runtime_info, is_gil_enabl
 from src.utils.ema_mt5 import ema_mt5
 from src.utils.paper_exit import paper_bar_exit
 from src.data import DataManager
-from src.strategies import MACDCrossoverStrategy, RSI_EMA_Strategy, SonicRStrategy, SonicRFundStrategy, SonicRM15Strategy, SonicRM5Strategy
+from src.strategies import  SonicRStrategy, SonicRM15Strategy, SonicRM5Strategy, TrendLine3Strategy
 from src.risk import RiskManager
 from src.notifier import TelegramNotifier
 from src.execution import MT5OrderExecutor, OrderResult
@@ -68,12 +68,10 @@ def _pip_size_of(symbol: str) -> float:
 
 
 _STRATEGY_REGISTRY = {
-    "MACDCrossover": MACDCrossoverStrategy,
-    "RSI_EMA": RSI_EMA_Strategy,
     "SonicR": SonicRStrategy,
-    "SonicRFund": SonicRFundStrategy,
     "SonicRM15": SonicRM15Strategy,
     "SonicRM5": SonicRM5Strategy,
+    "TrendLine3": TrendLine3Strategy,
 }
 
 
@@ -233,9 +231,151 @@ def main() -> None:
     def _emit_open_tp_sl(
         symbol: str, timeframe: str, st: dict, h: float, l: float, ts_str: str
     ) -> None:
-        """Kiểm tra và xử lý TP/SL cho một vị thế OPEN. Gọi từ cả M1 lẫn TF gốc."""
-        key = (symbol, timeframe, st.get("order_id", ""))
-        outcome = paper_bar_exit(st["is_buy"], h, l, st["sl"], st["tp"])
+        """
+        Kiểm tra và xử lý quản lý vị thế OPEN mỗi nến M1 (hoặc TF gốc):
+          1. Break-even  — dời SL về entry khi lời ≥ be_at_r × SL distance
+          2. Partial close — đóng partial_ratio khi lời ≥ partial_at_r × SL distance
+          3. TP / SL exit — đóng toàn bộ vị thế
+        """
+        key    = (symbol, timeframe, st.get("order_id", ""))
+        is_buy = bool(st["is_buy"])
+        entry  = float(st["entry"])
+
+        # ── Dùng original_sl để tính trigger prices (ổn định, không bị thay đổi sau BE) ──
+        orig_sl    = float(st.get("original_sl", st["sl"]))
+        sl_dist    = abs(entry - orig_sl)   # khoảng cách SL gốc
+        pip_size   = float(st.get("pip_size", _pip_size_of(symbol)))
+        ticket     = int(st.get("mt5_ticket", 0))
+        oid        = st.get("order_id", "")
+        oid_line   = f"\n🆔 <code>{oid}</code>" if oid else ""
+
+        # ────────────────────────────────────────────────────────────────────────
+        # 1. BREAK-EVEN CHECK
+        # ────────────────────────────────────────────────────────────────────────
+        be_at_r      = float(st.get("be_at_r", 0.0))
+        be_triggered = bool(st.get("be_triggered", False))
+
+        if be_at_r > 0 and not be_triggered and sl_dist > 0:
+            be_trigger_price = (entry + be_at_r * sl_dist) if is_buy else (entry - be_at_r * sl_dist)
+            be_hit = (is_buy and h >= be_trigger_price) or (not is_buy and l <= be_trigger_price)
+
+            if be_hit:
+                new_sl = entry   # SL = entry (break-even)
+                with paper_lock:
+                    current = paper_store.get(key)
+                    if current is None:
+                        return
+                    updated = {**current, "sl": new_sl, "be_triggered": True}
+                    paper_store.set(key, updated)
+                    st = updated
+
+                logger_main.info(
+                    "paper_track: BE activated %s %s entry=%.5f new_sl=%.5f order_id=%s",
+                    symbol, timeframe, entry, new_sl, oid,
+                )
+                # Notify BE
+                direction = "📈 BUY" if is_buy else "📉 SELL"
+                notifier.send_text(
+                    f"🔁 <b>Break-even activated (paper)</b>\n"
+                    f"🔹 <b>{symbol}</b> / {timeframe}  {direction}\n"
+                    f"💰 Entry <code>{entry:.5f}</code>  "
+                    f"📍 SL dời → <code>{new_sl:.5f}</code>\n"
+                    f"🎯 Trigger <code>{be_trigger_price:.5f}</code> (R≥{be_at_r})\n"
+                    f"🤖 {st.get('strategy', '')}"
+                    f"{oid_line}\n"
+                    f"🕐 <i>{ts_str}</i>"
+                )
+                # MT5: dời SL về entry
+                if ticket > 0:
+                    mt5_executor.modify_sl_async(ticket, symbol, new_sl, order_id=oid)
+
+        # ────────────────────────────────────────────────────────────────────────
+        # 2. PARTIAL CLOSE CHECK
+        # ────────────────────────────────────────────────────────────────────────
+        partial_at_r      = float(st.get("partial_at_r", 0.0))
+        partial_triggered = bool(st.get("partial_triggered", False))
+
+        if partial_at_r > 0 and not partial_triggered and sl_dist > 0:
+            partial_trigger_price = (
+                (entry + partial_at_r * sl_dist) if is_buy
+                else (entry - partial_at_r * sl_dist)
+            )
+            partial_hit = (is_buy and h >= partial_trigger_price) or (not is_buy and l <= partial_trigger_price)
+
+            if partial_hit:
+                ratio         = float(st.get("partial_ratio", 0.5))
+                full_volume   = float(st.get("volume", 0.0))
+                close_vol     = round(full_volume * ratio, 2)
+                remain_vol    = round(full_volume - close_vol, 2)
+                trail_pips    = float(st.get("partial_trail_pips", 0.0))
+                current_sl    = float(st["sl"])
+
+                # Dời SL sau partial: lock-in trail_pips pips lời
+                if trail_pips > 0 and pip_size > 0:
+                    if is_buy:
+                        # Dời SL lên tối thiểu entry + trail_pips (lock in pips)
+                        locked_sl = entry + trail_pips * pip_size
+                        new_sl_partial = max(current_sl, locked_sl)
+                    else:
+                        locked_sl = entry - trail_pips * pip_size
+                        new_sl_partial = min(current_sl, locked_sl)
+                else:
+                    new_sl_partial = current_sl   # không thay đổi
+
+                with paper_lock:
+                    current = paper_store.get(key)
+                    if current is None:
+                        return
+                    updated = {
+                        **current,
+                        "partial_triggered": True,
+                        "volume":           remain_vol,
+                        "sl":               new_sl_partial,
+                    }
+                    paper_store.set(key, updated)
+                    st = updated
+
+                logger_main.info(
+                    "paper_track: partial close %s %s close=%.2flot remain=%.2flot "
+                    "new_sl=%.5f order_id=%s",
+                    symbol, timeframe, close_vol, remain_vol, new_sl_partial, oid,
+                )
+                # Notify partial close
+                direction = "📈 BUY" if is_buy else "📉 SELL"
+                sl_change = (
+                    f" → <code>{new_sl_partial:.5f}</code>" if new_sl_partial != current_sl else ""
+                )
+                notifier.send_text(
+                    f"✂️ <b>Partial close (paper)</b>\n"
+                    f"🔹 <b>{symbol}</b> / {timeframe}  {direction}\n"
+                    f"💰 Entry <code>{entry:.5f}</code>  "
+                    f"🎯 Trigger <code>{partial_trigger_price:.5f}</code> (R≥{partial_at_r})\n"
+                    f"📦 Đóng <code>{close_vol:.2f}</code>lot  còn <code>{remain_vol:.2f}</code>lot\n"
+                    f"🛑 SL <code>{current_sl:.5f}</code>{sl_change}\n"
+                    f"🤖 {st.get('strategy', '')}"
+                    f"{oid_line}\n"
+                    f"🕐 <i>{ts_str}</i>"
+                )
+                # MT5: đóng partial + cập nhật SL
+                if ticket > 0:
+                    mt5_executor.close_partial_async(ticket, symbol, close_vol, is_buy, oid)
+                    if new_sl_partial != current_sl:
+                        tp_price = float(st.get("tp", 0.0))
+                        mt5_executor.modify_sl_async(ticket, symbol, new_sl_partial,
+                                                     new_tp=tp_price, order_id=oid)
+
+        # ────────────────────────────────────────────────────────────────────────
+        # 3. TP / SL EXIT CHECK (dùng SL hiện tại — đã cập nhật qua BE/partial)
+        # ────────────────────────────────────────────────────────────────────────
+        # Re-fetch state in case it was updated above
+        with paper_lock:
+            current_st = paper_store.get(key)
+        if current_st is None:
+            return
+
+        current_sl = float(current_st["sl"])
+        current_tp = float(current_st["tp"])
+        outcome = paper_bar_exit(is_buy, h, l, current_sl, current_tp)
         if outcome is None:
             return
 
@@ -244,19 +384,16 @@ def main() -> None:
                 return
             paper_store.set(key, None)
 
-        oid      = st.get("order_id", "")
-        oid_line = f"\n🆔 <code>{oid}</code>" if oid else ""
-
         _record_outcome(st.get("strategy", ""), symbol, timeframe, outcome.lower())
         if outcome == "TP":
             if notify_on_tp_hit:
                 notifier.send_text(
                     "✅ <b>TP hit (paper)</b>\n"
-                    f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
-                    f"🤖 {st['strategy']}\n"
-                    f"💰 Entry <code>{st['entry']:.5f}</code> →  "
-                    f"<b>TP</b> <code>{st['tp']:.5f}</code>\n"
-                    f"🛑 SL ref: <code>{st['sl']:.5f}</code>"
+                    f"🔹 <b>{current_st['symbol']}</b> / {current_st['timeframe']}\n"
+                    f"🤖 {current_st['strategy']}\n"
+                    f"💰 Entry <code>{current_st['entry']:.5f}</code> →  "
+                    f"<b>TP</b> <code>{current_tp:.5f}</code>\n"
+                    f"🛑 SL ref: <code>{current_sl:.5f}</code>"
                     f"{oid_line}\n"
                     f"🕐 <i>{ts_str}</i>"
                 )
@@ -270,10 +407,10 @@ def main() -> None:
             if notify_on_sl_hit:
                 notifier.send_text(
                     "🛑 <b>SL hit (paper)</b>\n"
-                    f"🔹 <b>{st['symbol']}</b> / {st['timeframe']}\n"
-                    f"🤖 {st['strategy']}\n"
-                    f"💰 Entry <code>{st['entry']:.5f}</code> →  "
-                    f"<b>SL</b> <code>{st['sl']:.5f}</code>"
+                    f"🔹 <b>{current_st['symbol']}</b> / {current_st['timeframe']}\n"
+                    f"🤖 {current_st['strategy']}\n"
+                    f"💰 Entry <code>{current_st['entry']:.5f}</code> →  "
+                    f"<b>SL</b> <code>{current_sl:.5f}</code>"
                     f"{oid_line}\n"
                     f"🕐 <i>{ts_str}</i>"
                 )
@@ -383,17 +520,25 @@ def main() -> None:
                         if paper_store.get(key) is None:
                             continue
                         paper_store.set(key, {
-                            "status":    "OPEN",
-                            "symbol":    st["symbol"],
-                            "timeframe": st["timeframe"],
-                            "is_buy":    is_buy,
-                            "entry":     fill_price,
-                            "sl":        sl_price,
-                            "tp":        tp_price,
-                            "strategy":  st["strategy"],
-                            "notes":     st.get("notes", ""),
-                            "order_id":  st.get("order_id", ""),
-                            "mt5_ticket": st.get("mt5_ticket", 0),
+                            "status":            "OPEN",
+                            "symbol":            st["symbol"],
+                            "timeframe":         st["timeframe"],
+                            "is_buy":            is_buy,
+                            "entry":             fill_price,
+                            "sl":                sl_price,
+                            "tp":                tp_price,
+                            "original_sl":       st.get("original_sl", sl_price),
+                            "volume":            st.get("volume", 0.0),
+                            "strategy":          st["strategy"],
+                            "notes":             st.get("notes", ""),
+                            "order_id":          st.get("order_id", ""),
+                            "mt5_ticket":        st.get("mt5_ticket", 0),
+                            "be_at_r":           st.get("be_at_r", 0.0),
+                            "be_triggered":      False,   # reset on fill
+                            "partial_at_r":      st.get("partial_at_r", 0.0),
+                            "partial_triggered": False,
+                            "partial_ratio":     st.get("partial_ratio", 0.5),
+                            "partial_trail_pips": st.get("partial_trail_pips", 5.0),
                         })
                     logger_main.info(
                         "paper_track(M1): limit FILLED %s %s fill=%.5f sl=%.5f tp=%.5f order_id=%s",
@@ -525,6 +670,8 @@ def main() -> None:
                     "sl_level":          sl_level,
                     "sl":                float(complete.sl),
                     "tp":                float(complete.tp1),
+                    "original_sl":       float(complete.sl),   # anchor cho BE/partial calc
+                    "volume":            float(complete.volume),
                     "rr_ratio":          float(complete.rr_ratio),
                     "pip_size":          _pip_size_of(complete.symbol),
                     "bars_remaining":    expiry_bars,
@@ -535,6 +682,12 @@ def main() -> None:
                     "order_id":          complete.order_id,
                     "mt5_ticket":        0,
                     "skip_next_bar":     True,  # bỏ qua nến M1 đầu tiên sau signal
+                    "be_at_r":           float(complete.breakeven_at_r),
+                    "be_triggered":      False,
+                    "partial_at_r":      float(complete.partial_close_at_r),
+                    "partial_triggered": False,
+                    "partial_ratio":     float(complete.partial_close_ratio),
+                    "partial_trail_pips": float(complete.partial_trail_pips),
                 })
                 logger_main.info(
                     "paper_track: PENDING %s %s %s limit=%.5f sl=%.5f tp=%.5f expiry=%d bars (%dm)",
@@ -544,23 +697,32 @@ def main() -> None:
                 )
             else:
                 paper_store.set(key, {
-                    "status":    "OPEN",
-                    "symbol":    complete.symbol,
-                    "timeframe": complete.timeframe,
-                    "is_buy":    is_buy,
-                    "entry":     float(complete.entry),
-                    "sl":        float(complete.sl),
-                    "tp":        float(complete.tp1),
-                    "strategy":  complete.strategy_name,
-                    "notes":     complete.notes or "",
-                    "order_id":  complete.order_id,
-                    "mt5_ticket": 0,
+                    "status":            "OPEN",
+                    "symbol":            complete.symbol,
+                    "timeframe":         complete.timeframe,
+                    "is_buy":            is_buy,
+                    "entry":             float(complete.entry),
+                    "sl":                float(complete.sl),
+                    "tp":                float(complete.tp1),
+                    "original_sl":       float(complete.sl),   # anchor cho BE/partial calc
+                    "volume":            float(complete.volume),
+                    "strategy":          complete.strategy_name,
+                    "notes":             complete.notes or "",
+                    "order_id":          complete.order_id,
+                    "mt5_ticket":        0,
+                    "be_at_r":           float(complete.breakeven_at_r),
+                    "be_triggered":      False,
+                    "partial_at_r":      float(complete.partial_close_at_r),
+                    "partial_triggered": False,
+                    "partial_ratio":     float(complete.partial_close_ratio),
+                    "partial_trail_pips": float(complete.partial_trail_pips),
                 })
                 logger_main.info(
-                    "paper_track: OPEN %s %s %s entry=%.5f sl=%.5f tp=%.5f",
+                    "paper_track: OPEN %s %s %s entry=%.5f sl=%.5f tp=%.5f be_at_r=%.1f partial_at_r=%.1f",
                     complete.symbol, complete.timeframe,
                     "BUY" if is_buy else "SELL",
                     complete.entry, complete.sl, complete.tp1,
+                    complete.breakeven_at_r, complete.partial_close_at_r,
                 )
 
     def on_new_bar(symbol: str, timeframe: str, df) -> None:

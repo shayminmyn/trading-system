@@ -81,6 +81,11 @@ class CompleteSignal:
     notes: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     order_id: str = ""
+    # ── Position management params (passed through from Signal) ───────────────
+    breakeven_at_r: float = 0.0       # Dời SL về entry khi lời ≥ N×SL. 0 = tắt
+    partial_close_at_r: float = 0.0   # Partial close khi lời ≥ N×SL. 0 = tắt
+    partial_close_ratio: float = 0.5  # Tỷ lệ đóng lệnh khi partial (0.5 = 50%)
+    partial_trail_pips: float = 5.0   # Dời SL thêm N pips sau partial close
 
     def __str__(self) -> str:
         return (
@@ -222,6 +227,10 @@ class RiskManager:
                 notes=signal.notes,
                 timestamp=signal.timestamp,
                 order_id=_make_order_id(signal.timestamp, signal.symbol, signal.timeframe),
+                breakeven_at_r=float(signal.breakeven_at_r),
+                partial_close_at_r=float(signal.partial_close_at_r),
+                partial_close_ratio=float(signal.partial_close_ratio),
+                partial_trail_pips=float(signal.partial_trail_pips),
             )
             logger.info("Risk calc complete: %s", cs)
             return cs
